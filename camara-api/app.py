@@ -26,12 +26,24 @@ st.set_page_config(
 def get_api_client():
     return CamaraAPIClient()
 
+# Cache para tipos de proposição
+@st.cache_data
+def get_tipos_proposicao():
+    """Carrega e cacheia os tipos de proposição"""
+    tipos = api.tipos_proposicao()
+    if tipos and 'dados' in tipos:
+        # Criar dicionário sigla -> nome
+        return {t['sigla']: t['nome'] for t in tipos['dados']}
+    return {}
+
 # Limpar cache se necessário (força recarga do módulo)
 if st.sidebar.button("🔄 Recarregar API"):
     st.cache_resource.clear()
+    st.cache_data.clear()
     st.rerun()
 
 api = get_api_client()
+tipos_prop = get_tipos_proposicao()
 
 # Título principal
 st.title("🏛️ API Dados Abertos - Câmara dos Deputados")
@@ -62,7 +74,7 @@ if opcao == "Deputados":
     if 'lista_deputados' not in st.session_state:
         st.session_state.lista_deputados = None
     
-    tab1, tab2, tab3, tab4 = st.tabs(["Listar Deputados", "Detalhes do Deputado", "Despesas", "Discursos"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Listar Deputados", "Detalhes do Deputado", "Despesas", "Discursos", "Proposições"])
     
     with tab1:
         st.subheader("Buscar Deputados")
@@ -268,6 +280,64 @@ if opcao == "Deputados":
                 st.rerun()
         else:
             st.info("👈 Selecione um deputado na aba 'Listar Deputados' para ver os discursos aqui.")
+    
+    with tab5:
+        if st.session_state.deputado_selecionado:
+            st.info(f"📋 Proposições do Deputado ID: {st.session_state.deputado_selecionado}")
+            
+            if st.button("🔍 Buscar Proposições", key="buscar_props_dep"):
+                with st.spinner("Buscando proposições..."):
+                    resultado = api.proposicoes_deputado(st.session_state.deputado_selecionado)
+                    
+                    if resultado and 'dados' in resultado:
+                        proposicoes = resultado['dados']
+                        
+                        if proposicoes:
+                            st.success(f"✅ {len(proposicoes)} proposições encontradas")
+                            
+                            # Preparar dados para exibição
+                            props_display = []
+                            for prop in proposicoes:
+                                sigla = prop.get('siglaTipo', '')
+                                props_display.append({
+                                    'ID': prop.get('id', ''),
+                                    'Tipo': sigla,
+                                    'Descrição': tipos_prop.get(sigla, 'N/A'),
+                                    'Número': prop.get('numero', ''),
+                                    'Ano': prop.get('ano', ''),
+                                    'Ementa': prop.get('ementa', '')[:100] + '...' if len(prop.get('ementa', '')) > 100 else prop.get('ementa', '')
+                                })
+                            
+                            df_props = pd.DataFrame(props_display)
+                            st.dataframe(df_props, width='stretch')
+                            
+                            # Exibir detalhes em expanders
+                            st.subheader("Detalhes das Proposições")
+                            for i, prop in enumerate(proposicoes):
+                                with st.expander(f"{prop.get('siglaTipo', '')} {prop.get('numero', '')}/{prop.get('ano', '')} - {prop.get('ementa', '')[:80]}..."):
+                                    st.write("**Ementa Completa:**")
+                                    st.write(prop.get('ementa', 'N/A'))
+                                    st.write("**Informações:**")
+                                    st.write(f"- ID: {prop.get('id', 'N/A')}")
+                                    st.write(f"- Tipo: {prop.get('siglaTipo', 'N/A')}")
+                                    st.write(f"- Número: {prop.get('numero', 'N/A')}")
+                                    st.write(f"- Ano: {prop.get('ano', 'N/A')}")
+                                    if 'uri' in prop:
+                                        st.write(f"- [Link da API]({prop['uri']})")
+                        else:
+                            st.warning("Nenhuma proposição encontrada para este deputado")
+                    elif resultado and 'error' in resultado:
+                        st.error(f"Erro: {resultado['error']}")
+                    else:
+                        st.warning("Nenhuma proposição encontrada para este deputado")
+            
+            # Botão para limpar seleção
+            if st.button("🔄 Limpar Seleção", key="limpar_props_dep"):
+                st.session_state.deputado_selecionado = None
+                st.session_state.lista_deputados = None
+                st.rerun()
+        else:
+            st.info("👈 Selecione um deputado na aba 'Listar Deputados' para ver as proposições aqui.")
 
 # ========== PROPOSIÇÕES ==========
 elif opcao == "Proposições":

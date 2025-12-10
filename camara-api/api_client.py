@@ -76,6 +76,18 @@ class CamaraAPIClient:
             params['dataFim'] = data_fim
         return self._get(f"deputados/{id_deputado}/discursos", params)
     
+    def proposicoes_deputado(self, id_deputado: int, pagina: int = 1, 
+                            itens: int = 15) -> Dict:
+        """Obtém as proposições de autoria de um deputado"""
+        params = {
+            'idDeputadoAutor': id_deputado,
+            'pagina': pagina, 
+            'itens': itens, 
+            'ordenarPor': 'id', 
+            'ordem': 'DESC'
+        }
+        return self._get("proposicoes", params)
+    
     # PROPOSIÇÕES
     def listar_proposicoes(self, sigla_tipo: Optional[str] = None,
                           numero: Optional[int] = None,
@@ -205,3 +217,8 @@ class CamaraAPIClient:
         """Lista os membros de um órgão"""
         params = {'pagina': pagina, 'itens': itens}
         return self._get(f"orgaos/{id_orgao}/membros", params)
+    
+    # REFERÊNCIAS
+    def tipos_proposicao(self) -> Dict:
+        """Obtém a lista de tipos de proposição"""
+        return self._get("referencias/tiposProposicao")
