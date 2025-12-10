@@ -77,7 +77,7 @@ class CamaraAPIClient:
         return self._get(f"deputados/{id_deputado}/discursos", params)
     
     def proposicoes_deputado(self, id_deputado: int, pagina: int = 1, 
-                            itens: int = 15) -> Dict:
+                            itens: int = 100) -> Dict:
         """Obtém as proposições de autoria de um deputado"""
         params = {
             'idDeputadoAutor': id_deputado,
@@ -126,6 +126,10 @@ class CamaraAPIClient:
     def temas_proposicao(self, id_proposicao: int) -> Dict:
         """Obtém os temas de uma proposição"""
         return self._get(f"proposicoes/{id_proposicao}/temas")
+    
+    def votacoes_proposicao(self, id_proposicao: int) -> Dict:
+        """Obtém as votações de uma proposição"""
+        return self._get(f"proposicoes/{id_proposicao}/votacoes")
     
     # PARTIDOS
     def listar_partidos(self, sigla: Optional[str] = None,

@@ -285,56 +285,112 @@ if opcao == "Deputados":
         if st.session_state.deputado_selecionado:
             st.info(f"📋 Proposições do Deputado ID: {st.session_state.deputado_selecionado}")
             
+            # Inicializar página e total de páginas se não existir
+            if 'pagina_props_deputado' not in st.session_state:
+                st.session_state.pagina_props_deputado = 1
+            if 'total_paginas_props_deputado' not in st.session_state:
+                st.session_state.total_paginas_props_deputado = 1
+            
             if st.button("🔍 Buscar Proposições", key="buscar_props_dep"):
-                with st.spinner("Buscando proposições..."):
-                    resultado = api.proposicoes_deputado(st.session_state.deputado_selecionado)
+                st.session_state.pagina_props_deputado = 1  # Resetar para página 1 ao buscar
+            
+            with st.spinner("Buscando proposições..."):
+                resultado = api.proposicoes_deputado(
+                    st.session_state.deputado_selecionado,
+                    pagina=st.session_state.pagina_props_deputado,
+                    itens=25
+                )
+                
+                if resultado and 'dados' in resultado:
+                    proposicoes = resultado['dados']
                     
-                    if resultado and 'dados' in resultado:
-                        proposicoes = resultado['dados']
+                    # Calcular total de páginas baseado nos links da API
+                    if 'links' in resultado:
+                        links = resultado['links']
+                        # Tentar extrair o total de páginas dos links
+                        for link in links:
+                            if link.get('rel') == 'last':
+                                # Extrair número da última página da URL
+                                import re
+                                match = re.search(r'pagina=(\d+)', link.get('href', ''))
+                                if match:
+                                    st.session_state.total_paginas_props_deputado = int(match.group(1))
+                    
+                    if proposicoes:
+                        st.success(f"✅ {len(proposicoes)} proposições encontradas")
                         
-                        if proposicoes:
-                            st.success(f"✅ {len(proposicoes)} proposições encontradas")
-                            
-                            # Preparar dados para exibição
-                            props_display = []
-                            for prop in proposicoes:
-                                sigla = prop.get('siglaTipo', '')
-                                props_display.append({
-                                    'ID': prop.get('id', ''),
-                                    'Tipo': sigla,
-                                    'Descrição': tipos_prop.get(sigla, 'N/A'),
-                                    'Número': prop.get('numero', ''),
-                                    'Ano': prop.get('ano', ''),
-                                    'Ementa': prop.get('ementa', '')[:100] + '...' if len(prop.get('ementa', '')) > 100 else prop.get('ementa', '')
-                                })
-                            
-                            df_props = pd.DataFrame(props_display)
-                            st.dataframe(df_props, width='stretch')
-                            
-                            # Exibir detalhes em expanders
-                            st.subheader("Detalhes das Proposições")
-                            for i, prop in enumerate(proposicoes):
-                                with st.expander(f"{prop.get('siglaTipo', '')} {prop.get('numero', '')}/{prop.get('ano', '')} - {prop.get('ementa', '')[:80]}..."):
-                                    st.write("**Ementa Completa:**")
-                                    st.write(prop.get('ementa', 'N/A'))
-                                    st.write("**Informações:**")
-                                    st.write(f"- ID: {prop.get('id', 'N/A')}")
-                                    st.write(f"- Tipo: {prop.get('siglaTipo', 'N/A')}")
-                                    st.write(f"- Número: {prop.get('numero', 'N/A')}")
-                                    st.write(f"- Ano: {prop.get('ano', 'N/A')}")
-                                    if 'uri' in prop:
-                                        st.write(f"- [Link da API]({prop['uri']})")
-                        else:
-                            st.warning("Nenhuma proposição encontrada para este deputado")
-                    elif resultado and 'error' in resultado:
-                        st.error(f"Erro: {resultado['error']}")
+                        # Preparar dados para exibição
+                        props_display = []
+                        for prop in proposicoes:
+                            sigla = prop.get('siglaTipo', '')
+                            props_display.append({
+                                'ID': prop.get('id', ''),
+                                'Tipo': sigla,
+                                'Descrição': tipos_prop.get(sigla, 'N/A'),
+                                'Número': prop.get('numero', ''),
+                                'Ano': prop.get('ano', ''),
+                                'Ementa': prop.get('ementa', '')[:100] + '...' if len(prop.get('ementa', '')) > 100 else prop.get('ementa', '')
+                            })
+                        
+                        df_props = pd.DataFrame(props_display)
+                        st.dataframe(df_props, width='stretch', height=925)
+                        
+                        # Controles de paginação logo abaixo da grid
+                        col1, col2, col3 = st.columns([2, 1, 2])
+                        with col1:
+                            if st.button("⬅️ Página Anterior", key="prev_props_dep", disabled=(st.session_state.pagina_props_deputado == 1)):
+                                st.session_state.pagina_props_deputado -= 1
+                                st.rerun()
+                        with col2:
+                            st.write(f"Página {st.session_state.pagina_props_deputado} / {st.session_state.total_paginas_props_deputado}")
+                        with col3:
+                            tem_proxima = len(proposicoes) == 25 and st.session_state.pagina_props_deputado < st.session_state.total_paginas_props_deputado
+                            if st.button("Próxima Página ➡️", key="next_props_dep", disabled=not tem_proxima):
+                                st.session_state.pagina_props_deputado += 1
+                                st.rerun()
+                        
+                        # Exibir detalhes em expanders
+                        st.subheader("Detalhes das Proposições")
+                        for i, prop in enumerate(proposicoes):
+                            with st.expander(f"{prop.get('siglaTipo', '')} {prop.get('numero', '')}/{prop.get('ano', '')} - {prop.get('ementa', '')[:80]}..."):
+                                st.write("**Ementa Completa:**")
+                                st.write(prop.get('ementa', 'N/A'))
+                                st.write("**Informações:**")
+                                st.write(f"- ID: {prop.get('id', 'N/A')}")
+                                st.write(f"- Tipo: {prop.get('siglaTipo', 'N/A')}")
+                                st.write(f"- Número: {prop.get('numero', 'N/A')}")
+                                st.write(f"- Ano: {prop.get('ano', 'N/A')}")
+                                if 'uri' in prop:
+                                    st.write(f"- [Link da API]({prop['uri']})")
+                                
+                                # Votações da proposição
+                                st.write("---")
+                                st.write("**Votações:**")
+                                if st.button(f"🗳️ Buscar Votações", key=f"vot_prop_{prop.get('id')}_{st.session_state.pagina_props_deputado}"):
+                                    with st.spinner("Buscando votações..."):
+                                        vot_result = api.votacoes_proposicao(prop.get('id'))
+                                        if vot_result and 'dados' in vot_result and vot_result['dados']:
+                                            st.success(f"✅ {len(vot_result['dados'])} votações encontradas")
+                                            for j, vot in enumerate(vot_result['dados']):
+                                                st.write(f"  {j+1}. **{vot.get('data', 'N/A')}** - {vot.get('descricao', 'N/A')[:80]}")
+                                                st.write(f"     - Aprovação: {vot.get('aprovacao', 'N/A')}")
+                                        else:
+                                            st.info("Nenhuma votação encontrada")
                     else:
-                        st.warning("Nenhuma proposição encontrada para este deputado")
+                        st.warning("Nenhuma proposição encontrada nesta página")
+                elif resultado and 'error' in resultado:
+                    st.error(f"Erro: {resultado['error']}")
+                else:
+                    st.warning("Nenhuma proposição encontrada para este deputado")
             
             # Botão para limpar seleção
             if st.button("🔄 Limpar Seleção", key="limpar_props_dep"):
                 st.session_state.deputado_selecionado = None
                 st.session_state.lista_deputados = None
+                if 'pagina_props_deputado' in st.session_state:
+                    del st.session_state.pagina_props_deputado
+                if 'total_paginas_props_deputado' in st.session_state:
+                    del st.session_state.total_paginas_props_deputado
                 st.rerun()
         else:
             st.info("👈 Selecione um deputado na aba 'Listar Deputados' para ver as proposições aqui.")
@@ -416,7 +472,7 @@ elif opcao == "Proposições":
             st.info(f"📋 Proposição ID: {id_proposicao} (selecionada da lista)")
             
             # Criar abas para diferentes tipos de informação
-            sub_tab1, sub_tab2, sub_tab3, sub_tab4 = st.tabs(["Informações Gerais", "Autores", "Tramitações", "Temas"])
+            sub_tab1, sub_tab2, sub_tab3, sub_tab4, sub_tab5 = st.tabs(["Informações Gerais", "Autores", "Tramitações", "Temas", "Votações"])
             
             with sub_tab1:
                 with st.spinner("Buscando detalhes..."):
@@ -512,6 +568,33 @@ elif opcao == "Proposições":
                         st.error(f"Erro: {resultado['error']}")
                     else:
                         st.info("Nenhum tema associado a esta proposição")
+            
+            with sub_tab5:
+                st.subheader("Votações da Proposição")
+                
+                if st.button("Buscar Votações", key="buscar_votacoes_prop"):
+                    with st.spinner("Buscando votações..."):
+                        resultado = api.votacoes_proposicao(id_proposicao)
+                        
+                        if resultado and 'dados' in resultado:
+                            votacoes = resultado['dados']
+                            if votacoes:
+                                st.success(f"✅ {len(votacoes)} votações encontradas")
+                                
+                                for i, vot in enumerate(votacoes):
+                                    with st.expander(f"Votação {i+1} - {vot.get('data', 'N/A')} - {vot.get('descricao', 'N/A')[:80]}"):
+                                        st.write(f"**ID:** {vot.get('id', 'N/A')}")
+                                        st.write(f"**Data:** {vot.get('data', 'N/A')}")
+                                        st.write(f"**Descrição:** {vot.get('descricao', 'N/A')}")
+                                        st.write(f"**Aprovação:** {vot.get('aprovacao', 'N/A')}")
+                                        if 'uri' in vot:
+                                            st.write(f"[Link da API]({vot['uri']})")
+                            else:
+                                st.info("Nenhuma votação encontrada para esta proposição")
+                        elif resultado and "error" in resultado:
+                            st.error(f"Erro: {resultado['error']}")
+                        else:
+                            st.info("Nenhuma votação encontrada para esta proposição")
             
             # Botão para limpar seleção
             if st.button("🔄 Limpar Seleção", key="limpar_proposicao"):
