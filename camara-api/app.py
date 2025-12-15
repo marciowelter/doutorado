@@ -409,6 +409,10 @@ elif opcao == "Proposições":
     
     with tab1:
         st.subheader("Buscar Proposições")
+        
+        st.info("💡 **Dica:** Por padrão, são listadas proposições dos últimos 30 dias. "
+               "Use o filtro de tramitação apenas se quiser filtrar por período específico de mudanças.")
+        
         col1, col2, col3 = st.columns(3)
         
         with col1:
@@ -416,14 +420,21 @@ elif opcao == "Proposições":
         with col2:
             numero_prop = st.number_input("Número", min_value=0, step=1)
         with col3:
-            ano_prop = st.number_input("Ano", min_value=1900, max_value=datetime.now().year, 
+            ano_prop = st.number_input("Ano de Apresentação", min_value=1900, max_value=datetime.now().year, 
                                       value=datetime.now().year)
         
-        col4, col5 = st.columns(2)
-        with col4:
-            data_inicio = st.date_input("Data Início", value=datetime.now() - timedelta(days=30))
-        with col5:
-            data_fim = st.date_input("Data Fim", value=datetime.now())
+        usar_filtro_tramitacao = st.checkbox("Filtrar por período de tramitação", value=False,
+                                             help="Marque para filtrar proposições que tiveram mudanças em um período específico")
+        
+        data_inicio = None
+        data_fim = None
+        
+        if usar_filtro_tramitacao:
+            col4, col5 = st.columns(2)
+            with col4:
+                data_inicio = st.date_input("Data Início Tramitação", value=datetime.now() - timedelta(days=30))
+            with col5:
+                data_fim = st.date_input("Data Fim Tramitação", value=datetime.now())
         
         if st.button("Buscar Proposições"):
             with st.spinner("Buscando proposições..."):
@@ -431,8 +442,8 @@ elif opcao == "Proposições":
                     sigla_tipo=sigla_tipo if sigla_tipo else None,
                     numero=numero_prop if numero_prop > 0 else None,
                     ano=ano_prop,
-                    data_inicio=data_inicio.strftime("%Y-%m-%d"),
-                    data_fim=data_fim.strftime("%Y-%m-%d"),
+                    data_inicio=data_inicio.strftime("%Y-%m-%d") if data_inicio else None,
+                    data_fim=data_fim.strftime("%Y-%m-%d") if data_fim else None,
                     itens=50
                 )
                 

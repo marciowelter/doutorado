@@ -102,12 +102,14 @@ class CamaraAPIClient:
             params['siglaTipo'] = sigla_tipo
         if numero:
             params['numero'] = numero
-        if ano:
+        # Não usar 'ano' se dataInicio/dataFim estão definidos (conflito na API)
+        if data_inicio or data_fim:
+            if data_inicio:
+                params['dataInicio'] = data_inicio
+            if data_fim:
+                params['dataFim'] = data_fim
+        elif ano:
             params['ano'] = ano
-        if data_inicio:
-            params['dataInicio'] = data_inicio
-        if data_fim:
-            params['dataFim'] = data_fim
             
         return self._get("proposicoes", params)
     
