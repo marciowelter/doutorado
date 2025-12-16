@@ -6,6 +6,10 @@ import streamlit as st
 import pandas as pd
 import importlib
 import sys
+import os
+from dotenv import load_dotenv
+import psycopg2
+from psycopg2 import OperationalError
 
 # Forçar recarga do módulo api_client
 if 'api_client' in sys.modules:
@@ -13,6 +17,9 @@ if 'api_client' in sys.modules:
 
 from api_client import CamaraAPIClient
 from datetime import datetime, timedelta
+
+# Carregar variáveis de ambiente
+load_dotenv()
 
 # Configuração da página
 st.set_page_config(
@@ -60,7 +67,8 @@ opcao = st.sidebar.selectbox(
         "Blocos",
         "Eventos",
         "Votações",
-        "Órgãos"
+        "Órgãos",
+        "Teste PostgreSQL"
     ]
 )
 
@@ -1005,6 +1013,142 @@ elif opcao == "Órgãos":
                 st.rerun()
         else:
             st.info("👈 Selecione um órgão na aba 'Listar Órgãos' para ver os detalhes.")
+
+# ========== TESTE POSTGRESQL ==========
+elif opcao == "Teste PostgreSQL":
+    st.header("🔌 Teste de Conexão PostgreSQL")
+    
+    # Inicializar estado da conexão
+    if 'pg_connection' not in st.session_state:
+        st.session_state.pg_connection = None
+    if 'pg_connected' not in st.session_state:
+        st.session_state.pg_connected = False
+    
+    # Obter credenciais do .env
+    pg_host = os.getenv('POSTGREE_HOST', 'pgsql.hetzner.welm.com.br')
+    pg_port = os.getenv('POSTGREE_PORT', '443')
+    pg_user = os.getenv('POSTGREE_USER', 'marcio')
+    pg_password = os.getenv('POSTGREE_PASSWORD', '')
+    
+    # Exibir informações de conexão
+    st.subheader("Configurações de Conexão")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.text_input("Host", value=pg_host, disabled=True)
+        st.text_input("Usuário", value=pg_user, disabled=True)
+    with col2:
+        st.text_input("Porta", value=pg_port, disabled=True)
+        st.text_input("Password", value="*" * len(pg_password), type="password", disabled=True)
+    
+    st.markdown("---")
+    
+    # Status visual de conexão
+    st.subheader("Status da Conexão")
+    
+    if st.session_state.pg_connected:
+        st.success("🟢 **CONECTADO** - A conexão com o PostgreSQL está ativa!")
+    else:
+        st.error("🔴 **DESCONECTADO** - Não há conexão ativa com o PostgreSQL.")
+    
+    st.markdown("---")
+    
+    # Botões de ação
+    col1, col2, col3 = st.columns([1, 1, 3])
+    
+    with col1:
+        if st.button("🔌 Conectar", disabled=st.session_state.pg_connected):
+            with st.spinner("Conectando ao PostgreSQL..."):
+                try:
+                    # Tentar conectar ao PostgreSQL
+                    connection = psycopg2.connect(
+                        host=pg_host,
+                        port=int(pg_port),
+                        user=pg_user,
+                        password=pg_password,
+                        database='banco',  # banco específico
+                        connect_timeout=10
+                    )
+                    
+                    st.session_state.pg_connection = connection
+                    st.session_state.pg_connected = True
+                    st.success("✅ Conexão estabelecida com sucesso!")
+                    
+                    # Testar a conexão executando uma query simples
+                    cursor = connection.cursor()
+                    cursor.execute("SELECT version();")
+                    version = cursor.fetchone()
+                    cursor.close()
+                    
+                    st.info(f"**Versão do PostgreSQL:** {version[0]}")
+                    st.rerun()
+                    
+                except OperationalError as e:
+                    st.error(f"❌ Erro ao conectar: {str(e)}")
+                    st.session_state.pg_connected = False
+                    st.session_state.pg_connection = None
+                except Exception as e:
+                    st.error(f"❌ Erro inesperado: {str(e)}")
+                    st.session_state.pg_connected = False
+                    st.session_state.pg_connection = None
+    
+    with col2:
+        if st.button("🔌 Desconectar", disabled=not st.session_state.pg_connected):
+            try:
+                if st.session_state.pg_connection:
+                    st.session_state.pg_connection.close()
+                st.session_state.pg_connection = None
+                st.session_state.pg_connected = False
+                st.success("✅ Desconectado com sucesso!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ Erro ao desconectar: {str(e)}")
+                st.session_state.pg_connection = None
+                st.session_state.pg_connected = False
+    
+    # Se conectado, mostrar informações adicionais
+    if st.session_state.pg_connected and st.session_state.pg_connection:
+        st.markdown("---")
+        st.subheader("Informações do Banco de Dados")
+        
+        try:
+            cursor = st.session_state.pg_connection.cursor()
+            
+            # Listar bancos de dados
+            cursor.execute("SELECT datname FROM pg_database WHERE datistemplate = false;")
+            databases = cursor.fetchall()
+            
+            st.write("**Bancos de dados disponíveis:**")
+            for db in databases:
+                st.write(f"- {db[0]}")
+            
+            # Informações de conexão
+            st.write("**Detalhes da conexão:**")
+            st.write(f"- Banco atual: banco")
+            st.write(f"- Status: {st.session_state.pg_connection.status}")
+            st.write(f"- Server Version: {st.session_state.pg_connection.server_version}")
+            
+            # Listar tabelas do schema 'doutorado'
+            st.markdown("---")
+            st.write("**Tabelas do schema 'doutorado':**")
+            cursor.execute("""
+                SELECT table_name 
+                FROM information_schema.tables 
+                WHERE table_schema = 'doutorado' 
+                AND table_type = 'BASE TABLE'
+                ORDER BY table_name;
+            """)
+            tables = cursor.fetchall()
+            
+            if tables:
+                for table in tables:
+                    st.write(f"- {table[0]}")
+            else:
+                st.info("Nenhuma tabela encontrada no schema 'doutorado'.")
+            
+            cursor.close()
+            
+        except Exception as e:
+            st.error(f"Erro ao buscar informações: {str(e)}")
 
 # Footer
 st.markdown("---")

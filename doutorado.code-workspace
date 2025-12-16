@@ -1,22 +1,9 @@
 {
 	"folders": [
 		{
+			"name": "doutorado",
 			"path": "."
 		}
 	],
-	"settings": {
-		"python.defaultInterpreterPath": "${workspaceFolder}/camara-api/doutorado/Scripts/python.exe",
-		"python.terminal.activateEnvironment": true,
-		"terminal.integrated.defaultProfile.windows": "PowerShell (doutorado)",
-		"terminal.integrated.profiles.windows": {
-			"PowerShell (doutorado)": {
-				"source": "PowerShell",
-				"args": [
-					"-NoExit",
-					"-Command",
-					"& '${workspaceFolder}/camara-api/doutorado/Scripts/Activate.ps1'"
-				]
-			}
-		}
-	}
+	"settings": {}
 }
