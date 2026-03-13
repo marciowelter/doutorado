@@ -10,6 +10,9 @@ import os
 from dotenv import load_dotenv
 import psycopg2
 from psycopg2 import OperationalError
+import requests
+import xml.etree.ElementTree as ET
+from urllib.parse import urljoin
 
 # Forçar recarga do módulo api_client
 if 'api_client' in sys.modules:
@@ -68,6 +71,7 @@ opcao = st.sidebar.selectbox(
         "Eventos",
         "Votações",
         "Órgãos",
+        "Notícias",
         "Teste PostgreSQL"
     ]
 )
@@ -1013,6 +1017,227 @@ elif opcao == "Órgãos":
                 st.rerun()
         else:
             st.info("👈 Selecione um órgão na aba 'Listar Órgãos' para ver os detalhes.")
+
+# ========== NOTÍCIAS ==========
+elif opcao == "Notícias":
+    st.header("📰 Notícias - Feeds RSS da Câmara dos Deputados")
+    
+    @st.cache_data(ttl=3600)  # Cache por 1 hora
+    def extrair_feeds_rss():
+        """Extrai todos os feeds RSS da página de notícias da Câmara"""
+        try:
+            url_base = "https://www.camara.leg.br/noticias/rss"
+            response = requests.get(url_base, timeout=10)
+            response.raise_for_status()
+            
+            # Parse do HTML para encontrar links de RSS
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            feeds = []
+            
+            # Buscar pelos painéis que contêm os feeds
+            # A estrutura é: <h4 class="media-heading">Título</h4> seguido de <a href="...">
+            paineis = soup.find_all('div', class_='panel-body')
+            
+            for painel in paineis:
+                # Buscar o título no h4 com classe media-heading
+                titulo_elem = painel.find('h4', class_='media-heading')
+                if not titulo_elem:
+                    continue
+                
+                titulo = titulo_elem.get_text(strip=True)
+                
+                # Buscar o link RSS dentro do mesmo painel
+                link_elem = painel.find('a', href=True)
+                if not link_elem:
+                    continue
+                
+                href = link_elem.get('href', '')
+                if 'rss' in href.lower():
+                    url = urljoin(url_base, href)
+                    
+                    # Evitar duplicatas
+                    if url not in [f['url'] for f in feeds]:
+                        feeds.append({
+                            'titulo': titulo,
+                            'url': url
+                        })
+            
+            # Se não encontrou feeds no HTML, tentar feeds conhecidos
+            if not feeds:
+                feeds_conhecidos = [
+                    {'titulo': 'Todas as Notícias', 'url': 'https://www.camara.leg.br/noticias/rss'},
+                    {'titulo': 'Últimas Notícias', 'url': 'https://www.camara.leg.br/noticias/ultimas/rss'},
+                    {'titulo': 'Notícias de Plenário', 'url': 'https://www.camara.leg.br/noticias/plenario/rss'},
+                    {'titulo': 'Notícias de Política', 'url': 'https://www.camara.leg.br/noticias/politica/rss'},
+                    {'titulo': 'Notícias de Economia', 'url': 'https://www.camara.leg.br/noticias/economia/rss'},
+                ]
+                
+                # Validar cada feed
+                for feed in feeds_conhecidos:
+                    try:
+                        test_response = requests.head(feed['url'], timeout=5)
+                        if test_response.status_code == 200:
+                            feeds.append(feed)
+                    except:
+                        pass
+            
+            return feeds
+            
+        except Exception as e:
+            st.error(f"Erro ao extrair feeds RSS: {str(e)}")
+            return []
+    
+    @st.cache_data(ttl=300)  # Cache por 5 minutos
+    def buscar_noticias_rss(url_feed):
+        """Busca notícias de um feed RSS específico"""
+        try:
+            response = requests.get(url_feed, timeout=10)
+            response.raise_for_status()
+            
+            # Parse do XML RSS
+            root = ET.fromstring(response.content)
+            
+            noticias = []
+            
+            # RSS 2.0
+            for item in root.findall('.//item'):
+                titulo = item.find('title')
+                link = item.find('link')
+                descricao = item.find('description')
+                data = item.find('pubDate')
+                
+                noticias.append({
+                    'Título': titulo.text if titulo is not None else 'Sem título',
+                    'Link': link.text if link is not None else '',
+                    'Descrição': descricao.text if descricao is not None else '',
+                    'Data': data.text if data is not None else ''
+                })
+            
+            # Se não encontrou itens no formato RSS 2.0, tentar Atom
+            if not noticias:
+                for entry in root.findall('.//{http://www.w3.org/2005/Atom}entry'):
+                    titulo = entry.find('{http://www.w3.org/2005/Atom}title')
+                    link = entry.find('{http://www.w3.org/2005/Atom}link')
+                    summary = entry.find('{http://www.w3.org/2005/Atom}summary')
+                    updated = entry.find('{http://www.w3.org/2005/Atom}updated')
+                    
+                    noticias.append({
+                        'Título': titulo.text if titulo is not None else 'Sem título',
+                        'Link': link.get('href', '') if link is not None else '',
+                        'Descrição': summary.text if summary is not None else '',
+                        'Data': updated.text if updated is not None else ''
+                    })
+            
+            return noticias
+            
+        except Exception as e:
+            st.error(f"Erro ao buscar notícias do feed: {str(e)}")
+            return []
+    
+    # Interface principal
+    tab1, tab2 = st.tabs(["📡 Feeds RSS Disponíveis", "📰 Notícias do Feed"])
+    
+    with tab1:
+        st.subheader("Feeds RSS Disponíveis")
+        st.info("Lista de feeds RSS encontrados no site da Câmara dos Deputados")
+        
+        if st.button("🔄 Atualizar Feeds"):
+            st.cache_data.clear()
+            st.rerun()
+        
+        with st.spinner("Buscando feeds RSS..."):
+            feeds = extrair_feeds_rss()
+        
+        if feeds:
+            # Criar DataFrame com os feeds
+            df_feeds = pd.DataFrame(feeds)
+            
+            st.success(f"✅ {len(feeds)} feed(s) encontrado(s)")
+            
+            # Exibir tabela com links clicáveis
+            st.dataframe(
+                df_feeds,
+                column_config={
+                    "titulo": st.column_config.TextColumn(
+                        "Título do Feed",
+                        width="medium"
+                    ),
+                    "url": st.column_config.LinkColumn(
+                        "URL do Feed RSS",
+                        display_text="Abrir Feed"
+                    )
+                },
+                hide_index=True,
+                use_container_width=True
+            )
+            
+            # Armazenar feeds no session_state para uso na segunda aba
+            st.session_state.feeds_disponiveis = feeds
+        else:
+            st.warning("Nenhum feed RSS encontrado.")
+    
+    with tab2:
+        st.subheader("Notícias do Feed")
+        
+        if 'feeds_disponiveis' in st.session_state and st.session_state.feeds_disponiveis:
+            # Criar selectbox com os feeds disponíveis
+            feed_opcoes = {f['titulo']: f['url'] for f in st.session_state.feeds_disponiveis}
+            feed_selecionado = st.selectbox(
+                "Selecione um feed para visualizar as notícias:",
+                options=list(feed_opcoes.keys())
+            )
+            
+            if feed_selecionado:
+                url_feed = feed_opcoes[feed_selecionado]
+                
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.info(f"📡 Feed: {feed_selecionado}")
+                with col2:
+                    if st.button("🔄 Atualizar Notícias"):
+                        # Limpar apenas o cache desta função
+                        st.cache_data.clear()
+                        st.rerun()
+                
+                with st.spinner("Carregando notícias..."):
+                    noticias = buscar_noticias_rss(url_feed)
+                
+                if noticias:
+                    st.success(f"✅ {len(noticias)} notícia(s) encontrada(s)")
+                    
+                    # Criar DataFrame com as notícias
+                    df_noticias = pd.DataFrame(noticias)
+                    
+                    # Exibir tabela com links clicáveis
+                    st.dataframe(
+                        df_noticias,
+                        column_config={
+                            "Título": st.column_config.TextColumn(
+                                "Título",
+                                width="large"
+                            ),
+                            "Link": st.column_config.LinkColumn(
+                                "Link",
+                                display_text="Abrir"
+                            ),
+                            "Descrição": st.column_config.TextColumn(
+                                "Descrição",
+                                width="large"
+                            ),
+                            "Data": st.column_config.TextColumn(
+                                "Data de Publicação",
+                                width="medium"
+                            )
+                        },
+                        hide_index=True,
+                        use_container_width=True
+                    )
+                else:
+                    st.warning("Nenhuma notícia encontrada neste feed.")
+        else:
+            st.info("👈 Vá para a aba 'Feeds RSS Disponíveis' primeiro para carregar os feeds.")
 
 # ========== TESTE POSTGRESQL ==========
 elif opcao == "Teste PostgreSQL":
