@@ -134,10 +134,23 @@ if opcao == "Deputados":
         # Exibir a tabela com seleção se houver dados
         if st.session_state.lista_deputados is not None:
             st.info("💡 Clique em uma linha da tabela para ver os detalhes do deputado nas outras abas")
+
+            df_deputados_display = st.session_state.lista_deputados.copy()
+            sigla_col = next(
+                (col for col in ['siglaPartido', 'sigla_partido', 'partido'] if col in df_deputados_display.columns),
+                None
+            )
+            if 'nome' in df_deputados_display.columns and sigla_col:
+                df_deputados_display['nome'] = df_deputados_display.apply(
+                    lambda row: f"{row['nome']} ({row[sigla_col]})"
+                    if pd.notna(row[sigla_col]) and str(row[sigla_col]).strip()
+                    else row['nome'],
+                    axis=1
+                )
             
             # Usar st.dataframe com seleção de linha
             event = st.dataframe(
-                st.session_state.lista_deputados,
+                df_deputados_display,
                 width='stretch',
                 on_select="rerun",
                 selection_mode="single-row"
@@ -1646,9 +1659,10 @@ elif opcao == "__ALESC__":
                             "justify-content:center;font-size:40px;'>👤</div>",
                             unsafe_allow_html=True
                         )
-                    st.markdown(f"**{dep['nome']}**")
+                    nome_exibicao = dep['nome']
                     if dep['partido']:
-                        st.caption(dep['partido'])
+                        nome_exibicao = f"{dep['nome']} ({dep['partido']})"
+                    st.markdown(f"**{nome_exibicao}**")
                     if dep['link_perfil']:
                         st.markdown(f"[Ver perfil]({dep['link_perfil']})")
 

@@ -99,6 +99,51 @@ def extrair_deputados_alesc() -> list[dict]:
     # Parse do HTML
     soup = BeautifulSoup(html, 'html.parser')
 
+    # Estratégia 1: estrutura atual da ALESC (nome em h3.lab-title-news)
+    name_nodes = soup.select('h3.lab-title-news')
+    if name_nodes:
+        print(f"Encontrados {len(name_nodes)} cards de deputados (lab-title-news).")
+        for name_node in name_nodes:
+            nome = name_node.get_text(strip=True)
+            if not nome:
+                continue
+
+            info_col = name_node.find_parent('div', class_='col') or name_node.parent
+
+            partido = ''
+            if info_col:
+                partido_el = info_col.select_one(
+                    'span.lab-button, span[class*="button"], span[class*="partido"], .partido, .sigla'
+                )
+                if partido_el and partido_el.get_text(strip=True):
+                    partido = partido_el.get_text(strip=True)
+
+            foto_url = ''
+            link_perfil = ''
+            row = name_node.find_parent('div', class_='row') or info_col
+            if row:
+                img = row.find('img')
+                if img:
+                    foto_url = img.get('src') or img.get('data-src') or ''
+                    if foto_url and foto_url.startswith('/'):
+                        foto_url = 'https://www.alesc.sc.gov.br' + foto_url
+
+                a = row.find_parent('a', href=True) or row.find('a', href=True)
+                if a:
+                    link_perfil = a['href']
+                    if link_perfil.startswith('/'):
+                        link_perfil = 'https://www.alesc.sc.gov.br' + link_perfil
+
+            deputados.append({
+                'nome': nome,
+                'partido': partido or None,
+                'foto_url': foto_url or None,
+                'link_perfil': link_perfil or None,
+            })
+
+        if deputados:
+            return deputados
+
     # Estratégias de extração em ordem de prioridade
     # 1. Cards com classe contendo "deputad" ou "parlamentar"
     cards = soup.find_all(
@@ -138,7 +183,15 @@ def extrair_deputados_alesc() -> list[dict]:
 
         # Partido
         partido = ''
-        for sel in ['.partido', '.party', '.sigla', 'span[class*="partido"]']:
+        for sel in [
+            '.partido',
+            '.party',
+            '.sigla',
+            '.lab-button',
+            'span[class*="button"]',
+            'span[class*="partido"]',
+            'span[style*="background"]',
+        ]:
             el = card.select_one(sel)
             if el and el.get_text(strip=True):
                 partido = el.get_text(strip=True)
