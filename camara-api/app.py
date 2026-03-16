@@ -1587,7 +1587,6 @@ elif opcao == "__ALESC__":
             sslmode='require',
         )
 
-    @st.cache_data(ttl=3600)
     def carregar_deputados_alesc():
         try:
             conn = conectar_postgresql_banco_alesc()
@@ -1600,10 +1599,19 @@ elif opcao == "__ALESC__":
             rows = cur.fetchall()
             cur.close()
             conn.close()
-            return [
-                {'nome': r[0], 'partido': r[1], 'foto_url': r[2], 'link_perfil': r[3]}
-                for r in rows
-            ]
+            deputados = []
+            for r in rows:
+                nome = (r[0] or '').strip()
+                partido = (r[1] or '').strip()
+                if partido in ('', '-', 'N/A', 'None', 'null'):
+                    partido = None
+                deputados.append({
+                    'nome': nome,
+                    'partido': partido,
+                    'foto_url': r[2],
+                    'link_perfil': r[3]
+                })
+            return deputados
         except Exception as e:
             return []
 
@@ -1624,6 +1632,8 @@ elif opcao == "__ALESC__":
         )
     else:
         st.subheader(f"👤 Deputados Estaduais ({len(deputados_alesc)} encontrados)")
+        total_com_partido = sum(1 for d in deputados_alesc if d['partido'])
+        st.caption(f"Partidos identificados: {total_com_partido} de {len(deputados_alesc)}")
 
         # Filtros
         col_f1, col_f2 = st.columns([2, 1])
@@ -1659,15 +1669,17 @@ elif opcao == "__ALESC__":
                             "justify-content:center;font-size:40px;'>👤</div>",
                             unsafe_allow_html=True
                         )
-                    nome_exibicao = dep['nome']
                     if dep['partido']:
-                        nome_exibicao = f"{dep['nome']} ({dep['partido']})"
-                    st.markdown(f"**{nome_exibicao}**")
+                        st.markdown(
+                            f"**{dep['nome']}** <span style='color:#0b6bcb; font-weight:600;'>({dep['partido']})</span>",
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.markdown(f"**{dep['nome']}**")
                     if dep['link_perfil']:
                         st.markdown(f"[Ver perfil]({dep['link_perfil']})")
 
         if st.button("🔄 Atualizar lista de deputados"):
-            st.cache_data.clear()
             st.rerun()
 
 # ========== TESTE POSTGRESQL ==========
