@@ -12,7 +12,7 @@ import psycopg2
 from psycopg2 import OperationalError
 import requests
 import xml.etree.ElementTree as ET
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse, urlunparse
 
 # Forçar recarga do módulo api_client
 if 'api_client' in sys.modules:
@@ -55,26 +55,39 @@ if st.sidebar.button("🔄 Recarregar API"):
 api = get_api_client()
 tipos_prop = get_tipos_proposicao()
 
-# Título principal
-st.title("🏛️ API Dados Abertos - Câmara dos Deputados")
-st.markdown("---")
-
-# Sidebar com seleção de funcionalidade
-st.sidebar.title("Menu")
-opcao = st.sidebar.selectbox(
-    "Escolha uma opção:",
-    [
-        "Deputados",
-        "Proposições",
-        "Partidos",
-        "Blocos",
-        "Eventos",
-        "Votações",
-        "Órgãos",
-        "Notícias",
-        "Teste PostgreSQL"
-    ]
+# Selector de domínio (Câmara ou ALESC)
+st.sidebar.title("Sistema Legislativo")
+dominio = st.sidebar.radio(
+    "Selecione o domínio:",
+    ["🏛️ Câmara dos Deputados", "🏛️ ALESC"],
+    key="dominio_selecionado"
 )
+
+st.sidebar.markdown("---")
+
+if dominio == "🏛️ Câmara dos Deputados":
+    # Título principal
+    st.title("🏛️ API Dados Abertos - Câmara dos Deputados")
+    st.markdown("---")
+
+    # Sidebar com seleção de funcionalidade
+    st.sidebar.title("Menu")
+    opcao = st.sidebar.selectbox(
+        "Escolha uma opção:",
+        [
+            "Deputados",
+            "Proposições",
+            "Partidos",
+            "Blocos",
+            "Eventos",
+            "Votações",
+            "Órgãos",
+            "Notícias",
+            "Teste PostgreSQL"
+        ]
+    )
+else:
+    opcao = "__ALESC__"
 
 # ========== DEPUTADOS ==========
 if opcao == "Deputados":
@@ -1090,7 +1103,7 @@ elif opcao == "Notícias":
             return []
     
     @st.cache_data(ttl=300)  # Cache por 5 minutos
-    def buscar_noticias_rss(url_feed):
+    def buscar_noticias_rss(url_feed, exibir_erro=True):
         """Busca notícias de um feed RSS específico"""
         try:
             response = requests.get(url_feed, timeout=10)
@@ -1133,8 +1146,292 @@ elif opcao == "Notícias":
             return noticias
             
         except Exception as e:
-            st.error(f"Erro ao buscar notícias do feed: {str(e)}")
+            if exibir_erro:
+                st.error(f"Erro ao buscar notícias do feed: {str(e)}")
             return []
+
+    def limpar_html_e_links(html_texto):
+        """Remove tags HTML e mantém apenas o texto dos hiperlinks."""
+        if not html_texto:
+            return ""
+
+        from bs4 import BeautifulSoup
+        import re
+
+        soup = BeautifulSoup(html_texto, 'html.parser')
+
+        for tag in soup(['script', 'style', 'noscript']):
+            tag.decompose()
+
+        for link in soup.find_all('a'):
+            link.replace_with(link.get_text(' ', strip=True))
+
+        texto_limpo = soup.get_text(' ', strip=True)
+        return re.sub(r'\s+', ' ', texto_limpo).strip()
+
+    def normalizar_link(url, base_url=''):
+        """Normaliza URL para deduplicação e validação."""
+        if not url:
+            return ""
+
+        url_completa = urljoin(base_url, url.strip())
+        parsed = urlparse(url_completa)
+
+        if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+            return ""
+
+        netloc = parsed.netloc.lower()
+        path = parsed.path.rstrip('/') if parsed.path not in ('', '/') else parsed.path
+        return urlunparse((parsed.scheme, netloc, path, '', '', ''))
+
+    def eh_link_noticia_camara(url):
+        """Valida se URL é de notícia do domínio da Câmara."""
+        if not url:
+            return False
+
+        parsed = urlparse(url)
+        host = parsed.netloc.lower().split(':')[0]
+        dominios_permitidos = ('camara.leg.br', 'camara.gov.br')
+
+        mesmo_dominio = any(
+            host == dominio or host.endswith(f'.{dominio}')
+            for dominio in dominios_permitidos
+        )
+
+        return mesmo_dominio and '/noticias/' in parsed.path.lower()
+
+    def extrair_links_noticias_relacionadas(soup, base_url=''):
+        """Extrai links de notícias da Câmara no HTML original da notícia."""
+        if soup is None:
+            return []
+
+        links = []
+        vistos = set()
+
+        # Prioriza blocos típicos de relacionadas e, na falta deles, varre a página.
+        anchors = []
+        seletores_relacionadas = [
+            '.relacionadas a[href]',
+            '.noticias-relacionadas a[href]',
+            '.veja-tambem a[href]',
+            '[class*="relacionad"] a[href]',
+            '[id*="relacionad"] a[href]',
+            'article a[href]'
+        ]
+
+        for seletor in seletores_relacionadas:
+            anchors.extend(soup.select(seletor))
+
+        if not anchors:
+            anchors = soup.find_all('a', href=True)
+
+        for anchor in anchors:
+            link = normalizar_link(anchor.get('href', ''), base_url)
+            if (
+                not link or
+                link in vistos or
+                link == normalizar_link(base_url) or
+                not eh_link_noticia_camara(link)
+            ):
+                continue
+
+            vistos.add(link)
+            links.append(link)
+
+        return links
+
+    def extrair_conteudo_noticia(url_noticia, retornar_relacionadas=False):
+        """Extrai o texto principal da notícia removendo HTML e hyperlinks."""
+        try:
+            response = requests.get(
+                url_noticia,
+                timeout=20,
+                headers={'User-Agent': 'Mozilla/5.0'}
+            )
+            response.raise_for_status()
+
+            from bs4 import BeautifulSoup
+            import re
+
+            soup = BeautifulSoup(response.text, 'html.parser')
+
+            links_relacionados = extrair_links_noticias_relacionadas(soup, url_noticia)
+
+            for tag in soup(['script', 'style', 'noscript', 'svg']):
+                tag.decompose()
+
+            seletores_conteudo = [
+                'article .g-artigo__texto',
+                '.g-artigo__texto',
+                'article .noticia__texto',
+                '.noticia__texto',
+                '.materia-content',
+                '.texto-noticia',
+                'article',
+                'main',
+                'body'
+            ]
+
+            bloco_conteudo = None
+            for seletor in seletores_conteudo:
+                candidato = soup.select_one(seletor)
+                if candidato and len(candidato.get_text(' ', strip=True)) > 120:
+                    bloco_conteudo = candidato
+                    break
+
+            if bloco_conteudo is None:
+                bloco_conteudo = soup.body if soup.body else soup
+
+            for link in bloco_conteudo.find_all('a'):
+                link.replace_with(link.get_text(' ', strip=True))
+
+            texto = bloco_conteudo.get_text(' ', strip=True)
+            texto_limpo = re.sub(r'\s+', ' ', texto).strip()
+
+            if retornar_relacionadas:
+                return texto_limpo, links_relacionados
+
+            return texto_limpo
+        except Exception:
+            if retornar_relacionadas:
+                return "", []
+            return ""
+
+    def conectar_postgresql_banco():
+        """Abre conexão com o banco banco usando variáveis de ambiente."""
+        pg_host = os.getenv('POSTGREE_HOST', 'pgsql.hetzner.welm.com.br')
+        pg_port = int(os.getenv('POSTGREE_PORT', '443'))
+        pg_user = os.getenv('POSTGREE_USER', 'marcio')
+        pg_password = os.getenv('POSTGREE_PASSWORD', '')
+
+        connection = psycopg2.connect(
+            host=pg_host,
+            port=pg_port,
+            user=pg_user,
+            password=pg_password,
+            database='banco',
+            connect_timeout=15
+        )
+        connection.autocommit = True
+        return connection
+
+    def importar_noticias_feeds_para_postgres(feeds):
+        """Importa notícias de todos os feeds para doutorado.noticias."""
+        resultado = {
+            'total_feeds': len(feeds),
+            'total_lidas': 0,
+            'importadas': 0,
+            'relacionadas_importadas': 0,
+            'relacionadas_encontradas': 0,
+            'duplicadas': 0,
+            'sem_link': 0,
+            'falhas': 0,
+            'erro': None
+        }
+
+        if not feeds:
+            return resultado
+
+        connection = None
+        cursor = None
+
+        try:
+            connection = conectar_postgresql_banco()
+            cursor = connection.cursor()
+
+            cursor.execute("CREATE SCHEMA IF NOT EXISTS doutorado;")
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS doutorado.noticias (
+                    id BIGSERIAL PRIMARY KEY,
+                    link TEXT NOT NULL,
+                    data_importacao TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    conteudo TEXT,
+                    CONSTRAINT noticias_link_url_completa_chk CHECK (link ~* '^https?://')
+                );
+                """
+            )
+
+            insert_sql = """
+                INSERT INTO doutorado.noticias (link, data_importacao, conteudo)
+                SELECT %s, NOW(), %s
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM doutorado.noticias
+                    WHERE regexp_replace(link, '/+$', '') = regexp_replace(%s, '/+$', '')
+                );
+            """
+
+            links_processados = set()
+
+            for feed in feeds:
+                url_feed = feed.get('url', '')
+                if not url_feed:
+                    continue
+
+                noticias_feed = buscar_noticias_rss(url_feed, exibir_erro=False)
+
+                for noticia in noticias_feed:
+                    resultado['total_lidas'] += 1
+
+                    link_noticia = normalizar_link(noticia.get('Link') or '', url_feed)
+                    if not link_noticia:
+                        resultado['sem_link'] += 1
+                        continue
+
+                    conteudo, links_relacionados = extrair_conteudo_noticia(
+                        link_noticia,
+                        retornar_relacionadas=True
+                    )
+                    corpo_rss = noticia.get('Descrição', '')
+
+                    if not conteudo:
+                        conteudo = limpar_html_e_links(corpo_rss)
+
+                    try:
+                        cursor.execute(insert_sql, (link_noticia, conteudo, link_noticia))
+                        if cursor.rowcount == 1:
+                            resultado['importadas'] += 1
+                        else:
+                            resultado['duplicadas'] += 1
+                    except Exception:
+                        resultado['falhas'] += 1
+
+                    links_processados.add(link_noticia)
+
+                    # Procura links de notícias relacionadas no HTML original da notícia principal.
+                    resultado['relacionadas_encontradas'] += len(links_relacionados)
+
+                    for link_relacionado in links_relacionados:
+                        if link_relacionado in links_processados or link_relacionado == link_noticia:
+                            continue
+
+                        links_processados.add(link_relacionado)
+                        conteudo_relacionado = extrair_conteudo_noticia(link_relacionado)
+
+                        # Só importa link relacionado quando conseguir abrir e extrair conteúdo principal.
+                        if not conteudo_relacionado:
+                            continue
+
+                        try:
+                            cursor.execute(insert_sql, (link_relacionado, conteudo_relacionado, link_relacionado))
+                            if cursor.rowcount == 1:
+                                resultado['importadas'] += 1
+                                resultado['relacionadas_importadas'] += 1
+                            else:
+                                resultado['duplicadas'] += 1
+                        except Exception:
+                            resultado['falhas'] += 1
+
+            return resultado
+        except Exception as e:
+            resultado['erro'] = str(e)
+            return resultado
+        finally:
+            if cursor:
+                cursor.close()
+            if connection:
+                connection.close()
     
     # Interface principal
     tab1, tab2 = st.tabs(["📡 Feeds RSS Disponíveis", "📰 Notícias do Feed"])
@@ -1170,7 +1467,7 @@ elif opcao == "Notícias":
                     )
                 },
                 hide_index=True,
-                use_container_width=True
+                width='stretch'
             )
             
             # Armazenar feeds no session_state para uso na segunda aba
@@ -1180,8 +1477,30 @@ elif opcao == "Notícias":
     
     with tab2:
         st.subheader("Notícias do Feed")
+
+        if 'feeds_disponiveis' not in st.session_state or not st.session_state.feeds_disponiveis:
+            with st.spinner("Carregando feeds RSS..."):
+                st.session_state.feeds_disponiveis = extrair_feeds_rss()
         
         if 'feeds_disponiveis' in st.session_state and st.session_state.feeds_disponiveis:
+            if st.button("⬇️ Importar todas as notícias dos feeds", type="primary"):
+                with st.spinner("Importando notícias para o PostgreSQL..."):
+                    status_importacao = importar_noticias_feeds_para_postgres(st.session_state.feeds_disponiveis)
+
+                if status_importacao.get('erro'):
+                    st.error(f"Erro durante a importação: {status_importacao['erro']}")
+                else:
+                    st.success(f"✅ Importação concluída. {status_importacao['importadas']} notícia(s) importada(s).")
+                    st.info(
+                        f"Feeds processados: {status_importacao['total_feeds']} | "
+                        f"Notícias lidas: {status_importacao['total_lidas']} | "
+                        f"Relacionadas encontradas: {status_importacao['relacionadas_encontradas']} | "
+                        f"Relacionadas importadas: {status_importacao['relacionadas_importadas']} | "
+                        f"Duplicadas: {status_importacao['duplicadas']} | "
+                        f"Sem link: {status_importacao['sem_link']} | "
+                        f"Falhas: {status_importacao['falhas']}"
+                    )
+
             # Criar selectbox com os feeds disponíveis
             feed_opcoes = {f['titulo']: f['url'] for f in st.session_state.feeds_disponiveis}
             feed_selecionado = st.selectbox(
@@ -1232,12 +1551,110 @@ elif opcao == "Notícias":
                             )
                         },
                         hide_index=True,
-                        use_container_width=True
+                        width='stretch'
                     )
                 else:
                     st.warning("Nenhuma notícia encontrada neste feed.")
         else:
-            st.info("👈 Vá para a aba 'Feeds RSS Disponíveis' primeiro para carregar os feeds.")
+            st.info("Nenhum feed disponível para importação ou visualização.")
+
+# ========== ALESC ==========
+elif opcao == "__ALESC__":
+    st.title("🏛️ Assembleia Legislativa do Estado de Santa Catarina - ALESC")
+    st.markdown("---")
+
+    def conectar_postgresql_banco_alesc():
+        return psycopg2.connect(
+            host=os.getenv('POSTGREE_HOST'),
+            port=int(os.getenv('POSTGREE_PORT', 5432)),
+            user=os.getenv('POSTGREE_USER'),
+            password=os.getenv('POSTGREE_PASSWORD'),
+            database='banco',
+            connect_timeout=15,
+            sslmode='require',
+        )
+
+    @st.cache_data(ttl=3600)
+    def carregar_deputados_alesc():
+        try:
+            conn = conectar_postgresql_banco_alesc()
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT nome, partido, foto_url, link_perfil
+                FROM doutorado.deputados_alesc
+                ORDER BY nome
+            """)
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+            return [
+                {'nome': r[0], 'partido': r[1], 'foto_url': r[2], 'link_perfil': r[3]}
+                for r in rows
+            ]
+        except Exception as e:
+            return []
+
+    deputados_alesc = carregar_deputados_alesc()
+
+    if not deputados_alesc:
+        st.warning(
+            "Nenhum deputado cadastrado ainda. "
+            "Execute o script **alesc_scraper.py** na sua máquina local para popular os dados:\n\n"
+            "```bash\n"
+            "python alesc_scraper.py\n"
+            "```"
+        )
+        st.info(
+            "**Por quê rodar localmente?**\n\n"
+            "O site www.alesc.sc.gov.br bloqueia conexões de IPs fora do Brasil. "
+            "O script deve ser executado na sua máquina (IP brasileiro) e salvará os dados diretamente no banco PostgreSQL."
+        )
+    else:
+        st.subheader(f"👤 Deputados Estaduais ({len(deputados_alesc)} encontrados)")
+
+        # Filtros
+        col_f1, col_f2 = st.columns([2, 1])
+        with col_f1:
+            busca = st.text_input("🔍 Buscar por nome", placeholder="Digite parte do nome...")
+        with col_f2:
+            partidos_disponiveis = sorted({d['partido'] for d in deputados_alesc if d['partido']})
+            partido_filtro = st.selectbox("Filtrar por partido", ["Todos"] + partidos_disponiveis)
+
+        # Aplicar filtros
+        lista_filtrada = deputados_alesc
+        if busca:
+            lista_filtrada = [d for d in lista_filtrada if busca.lower() in d['nome'].lower()]
+        if partido_filtro != "Todos":
+            lista_filtrada = [d for d in lista_filtrada if d['partido'] == partido_filtro]
+
+        st.markdown(f"*Exibindo {len(lista_filtrada)} deputado(s)*")
+        st.markdown("---")
+
+        # Grid de cards (4 por linha)
+        cols_por_linha = 4
+        for i in range(0, len(lista_filtrada), cols_por_linha):
+            linha = lista_filtrada[i:i + cols_por_linha]
+            cols = st.columns(cols_por_linha)
+            for j, dep in enumerate(linha):
+                with cols[j]:
+                    if dep['foto_url']:
+                        st.image(dep['foto_url'], width=140)
+                    else:
+                        st.markdown(
+                            "<div style='width:140px;height:140px;background:#e0e0e0;"
+                            "border-radius:8px;display:flex;align-items:center;"
+                            "justify-content:center;font-size:40px;'>👤</div>",
+                            unsafe_allow_html=True
+                        )
+                    st.markdown(f"**{dep['nome']}**")
+                    if dep['partido']:
+                        st.caption(dep['partido'])
+                    if dep['link_perfil']:
+                        st.markdown(f"[Ver perfil]({dep['link_perfil']})")
+
+        if st.button("🔄 Atualizar lista de deputados"):
+            st.cache_data.clear()
+            st.rerun()
 
 # ========== TESTE POSTGRESQL ==========
 elif opcao == "Teste PostgreSQL":
