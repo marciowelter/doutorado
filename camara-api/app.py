@@ -1607,66 +1607,578 @@ elif opcao == "__ALESC__":
         except Exception as e:
             return []
 
+    @st.cache_data(ttl=3600)
+    def contar_atas_alesc():
+        try:
+            conn = conectar_postgresql_banco_alesc()
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM doutorado.atas_alesc")
+            total = cur.fetchone()[0]
+            cur.close()
+            conn.close()
+            return total
+        except Exception:
+            return 0
+
+    @st.cache_data(ttl=3600)
+    def carregar_atas_alesc(pagina: int, itens_por_pagina: int):
+        try:
+            offset = (pagina - 1) * itens_por_pagina
+
+            conn = conectar_postgresql_banco_alesc()
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT
+                    data_evento,
+                    local_evento,
+                    tipo_evento,
+                    ementa,
+                    conteudo_ata,
+                    url_visualizacao,
+                    url_download,
+                    data_importacao
+                FROM doutorado.atas_alesc
+                ORDER BY data_evento DESC NULLS LAST, data_importacao DESC NULLS LAST
+                LIMIT %s OFFSET %s
+                """,
+                (itens_por_pagina, offset),
+            )
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+
+            atas = []
+            for r in rows:
+                atas.append(
+                    {
+                        'data_evento': r[0].strftime('%d/%m/%Y') if r[0] else None,
+                        'local_evento': r[1],
+                        'tipo_evento': r[2],
+                        'ementa': r[3],
+                        'conteudo_ata': r[4],
+                        'url_visualizacao': r[5],
+                        'url_download': r[6],
+                        'data_importacao': r[7].strftime('%d/%m/%Y %H:%M:%S') if r[7] else None,
+                    }
+                )
+            return atas
+        except Exception:
+            return []
+
+    def _montar_filtro_atas_plenarias(
+        filtro_diario: str,
+        filtro_numero_ata: str,
+        filtro_sessao_legislativa: int | None,
+        filtro_tipo_sessao: str | None,
+    ):
+        where = []
+        params = []
+
+        if filtro_diario:
+            where.append("CAST(diario_numero AS TEXT) LIKE %s")
+            params.append(f"%{filtro_diario}%")
+
+        if filtro_numero_ata:
+            where.append("CAST(numero_ata AS TEXT) LIKE %s")
+            params.append(f"%{filtro_numero_ata}%")
+
+        if filtro_sessao_legislativa is not None:
+            where.append("sessao_legislativa = %s")
+            params.append(filtro_sessao_legislativa)
+
+        if filtro_tipo_sessao:
+            where.append("tipo_sessao = %s")
+            params.append(filtro_tipo_sessao)
+
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        return where_sql, params
+
+    @st.cache_data(ttl=3600)
+    def carregar_sessoes_legislativas_plenarias_alesc():
+        try:
+            conn = conectar_postgresql_banco_alesc()
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT DISTINCT sessao_legislativa
+                FROM doutorado.atas_sessoes_plenarias_alesc
+                WHERE sessao_legislativa IS NOT NULL
+                ORDER BY sessao_legislativa DESC
+                """
+            )
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+            return [r[0] for r in rows]
+        except Exception:
+            return []
+
+    @st.cache_data(ttl=3600)
+    def carregar_tipos_sessao_plenarias_alesc():
+        try:
+            conn = conectar_postgresql_banco_alesc()
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT DISTINCT tipo_sessao
+                FROM doutorado.atas_sessoes_plenarias_alesc
+                WHERE tipo_sessao IS NOT NULL
+                ORDER BY tipo_sessao ASC
+                """
+            )
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+            return [r[0] for r in rows]
+        except Exception:
+            return []
+
+    @st.cache_data(ttl=3600)
+    def contar_atas_plenarias_alesc(
+        filtro_diario: str = '',
+        filtro_numero_ata: str = '',
+        filtro_sessao_legislativa: int | None = None,
+        filtro_tipo_sessao: str | None = None,
+    ):
+        try:
+            where_sql, params = _montar_filtro_atas_plenarias(
+                filtro_diario,
+                filtro_numero_ata,
+                filtro_sessao_legislativa,
+                filtro_tipo_sessao,
+            )
+
+            conn = conectar_postgresql_banco_alesc()
+            cur = conn.cursor()
+            cur.execute(
+                f"SELECT COUNT(*) FROM doutorado.atas_sessoes_plenarias_alesc {where_sql}",
+                params,
+            )
+            total = cur.fetchone()[0]
+            cur.close()
+            conn.close()
+            return total
+        except Exception:
+            return 0
+
+    @st.cache_data(ttl=3600)
+    def carregar_atas_plenarias_alesc(
+        pagina: int,
+        itens_por_pagina: int,
+        filtro_diario: str = '',
+        filtro_numero_ata: str = '',
+        filtro_sessao_legislativa: int | None = None,
+        filtro_tipo_sessao: str | None = None,
+    ):
+        try:
+            where_sql, params = _montar_filtro_atas_plenarias(
+                filtro_diario,
+                filtro_numero_ata,
+                filtro_sessao_legislativa,
+                filtro_tipo_sessao,
+            )
+            offset = (pagina - 1) * itens_por_pagina
+
+            conn = conectar_postgresql_banco_alesc()
+            cur = conn.cursor()
+            cur.execute(
+                f"""
+                SELECT
+                    diario_numero,
+                    diario_data_publicacao,
+                    diario_url_download,
+                    numero_ata,
+                    sessao_legislativa,
+                    legislatura,
+                    titulo_ata,
+                    conteudo_ata,
+                    tipo_sessao,
+                    data_importacao
+                FROM doutorado.atas_sessoes_plenarias_alesc
+                {where_sql}
+                ORDER BY diario_numero DESC, numero_ata DESC, data_importacao DESC NULLS LAST
+                LIMIT %s OFFSET %s
+                """,
+                params + [itens_por_pagina, offset],
+            )
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+
+            atas = []
+            for r in rows:
+                atas.append(
+                    {
+                        'diario_numero': r[0],
+                        'diario_data_publicacao': r[1].strftime('%d/%m/%Y') if r[1] else None,
+                        'diario_url_download': r[2],
+                        'numero_ata': r[3],
+                        'sessao_legislativa': r[4],
+                        'legislatura': r[5],
+                        'titulo_ata': r[6],
+                        'conteudo_ata': r[7],
+                        'tipo_sessao': r[8],
+                        'data_importacao': r[9].strftime('%d/%m/%Y %H:%M:%S') if r[9] else None,
+                    }
+                )
+            return atas
+        except Exception:
+            return []
+
     deputados_alesc = carregar_deputados_alesc()
+    total_atas_alesc = contar_atas_alesc()
+    total_atas_plenarias_geral = contar_atas_plenarias_alesc()
+    sessoes_legislativas_plenarias = carregar_sessoes_legislativas_plenarias_alesc()
+    tipos_sessao_plenarias = carregar_tipos_sessao_plenarias_alesc()
 
-    if not deputados_alesc:
-        st.warning(
-            "Nenhum deputado cadastrado ainda. "
-            "Execute o script **alesc_scraper.py** na sua máquina local para popular os dados:\n\n"
-            "```bash\n"
-            "python alesc_scraper.py\n"
-            "```"
-        )
+    tab_deputados_alesc, tab_atas_alesc, tab_atas_plenarias_alesc = st.tabs(
+        ["👤 Deputados Estaduais", "📝 Atas", "🏛️ Atas Plenarias"]
+    )
+
+    with tab_deputados_alesc:
+        if not deputados_alesc:
+            st.warning(
+                "Nenhum deputado cadastrado ainda. "
+                "Execute o script **alesc_scraper.py** na sua maquina local para popular os dados:\n\n"
+                "```bash\n"
+                "python alesc_scraper.py\n"
+                "```"
+            )
+            st.info(
+                "**Por que rodar localmente?**\n\n"
+                "O site www.alesc.sc.gov.br bloqueia conexoes de IPs fora do Brasil. "
+                "O script deve ser executado na sua maquina (IP brasileiro) e salvara os dados no PostgreSQL."
+            )
+        else:
+            st.subheader(f"👤 Deputados Estaduais ({len(deputados_alesc)} encontrados)")
+
+            # Filtros
+            col_f1, col_f2 = st.columns([2, 1])
+            with col_f1:
+                busca = st.text_input("🔍 Buscar por nome", placeholder="Digite parte do nome...")
+            with col_f2:
+                partidos_disponiveis = sorted({d['partido'] for d in deputados_alesc if d['partido']})
+                partido_filtro = st.selectbox("Filtrar por partido", ["Todos"] + partidos_disponiveis)
+
+            # Aplicar filtros
+            lista_filtrada = deputados_alesc
+            if busca:
+                lista_filtrada = [d for d in lista_filtrada if busca.lower() in d['nome'].lower()]
+            if partido_filtro != "Todos":
+                lista_filtrada = [d for d in lista_filtrada if d['partido'] == partido_filtro]
+
+            st.markdown(f"*Exibindo {len(lista_filtrada)} deputado(s)*")
+            st.markdown("---")
+
+            # Grid de cards (4 por linha)
+            cols_por_linha = 4
+            for i in range(0, len(lista_filtrada), cols_por_linha):
+                linha = lista_filtrada[i:i + cols_por_linha]
+                cols = st.columns(cols_por_linha)
+                for j, dep in enumerate(linha):
+                    with cols[j]:
+                        if dep['foto_url']:
+                            st.image(dep['foto_url'], width=140)
+                        else:
+                            st.markdown(
+                                "<div style='width:140px;height:140px;background:#e0e0e0;"
+                                "border-radius:8px;display:flex;align-items:center;"
+                                "justify-content:center;font-size:40px;'>👤</div>",
+                                unsafe_allow_html=True
+                            )
+                        nome_exibicao = dep['nome']
+                        if dep['partido']:
+                            nome_exibicao = f"{dep['nome']} ({dep['partido']})"
+                        st.markdown(f"**{nome_exibicao}**")
+                        if dep['link_perfil']:
+                            st.markdown(f"[Ver perfil]({dep['link_perfil']})")
+
+        if st.button("🔄 Atualizar lista de deputados", key="atualizar_deputados_alesc"):
+            st.cache_data.clear()
+            st.rerun()
+
+    with tab_atas_alesc:
+        st.info("Importacao de Atas configurada para varrer todas as paginas disponiveis no portal da ALESC.")
+
+        if total_atas_alesc == 0:
+            st.warning(
+                "Nenhuma ata cadastrada ainda. "
+                "Execute o script local para importar todas as atas:\n\n"
+                "```bash\n"
+                "python alesc_atas_scraper.py\n"
+                "```"
+            )
+            st.info(
+                "O scraper acessa https://portalelegis.alesc.sc.gov.br/comissoes-permanentes/atas, "
+                "percorre todas as paginas (hoje 258), baixa anexos PDF/DOC/DOCX e extrai o conteudo das atas. "
+                "A deduplicacao e feita por url de download para evitar registros repetidos em reexecucoes."
+            )
+        else:
+            st.subheader(f"📝 Atas importadas ({total_atas_alesc} registro(s))")
+
+            col_pag1, col_pag2, col_pag3 = st.columns([1, 1, 2])
+            with col_pag1:
+                itens_por_pagina_atas = st.selectbox(
+                    'Itens por pagina',
+                    [20, 50, 100],
+                    index=1,
+                    key='itens_por_pagina_atas_alesc',
+                )
+
+            total_paginas_atas = max(1, (total_atas_alesc + itens_por_pagina_atas - 1) // itens_por_pagina_atas)
+
+            with col_pag2:
+                pagina_atas = int(
+                    st.number_input(
+                        'Pagina',
+                        min_value=1,
+                        max_value=total_paginas_atas,
+                        value=min(st.session_state.get('pagina_atas_alesc', 1), total_paginas_atas),
+                        step=1,
+                        key='pagina_atas_alesc',
+                    )
+                )
+
+            inicio_atas = ((pagina_atas - 1) * itens_por_pagina_atas) + 1
+            fim_atas = min(pagina_atas * itens_por_pagina_atas, total_atas_alesc)
+            with col_pag3:
+                st.caption(
+                    f"Exibindo {inicio_atas}-{fim_atas} de {total_atas_alesc} registros "
+                    f"(pagina {pagina_atas} de {total_paginas_atas})."
+                )
+
+            atas_alesc = carregar_atas_alesc(pagina_atas, itens_por_pagina_atas)
+
+            df_atas = pd.DataFrame(
+                [
+                    {
+                        'Data do Evento': a['data_evento'],
+                        'Local do Evento': a['local_evento'],
+                        'Tipo de Evento': a['tipo_evento'],
+                        'Ementa': (a['ementa'][:140] + '...') if a['ementa'] and len(a['ementa']) > 140 else a['ementa'],
+                        'Visualizacao': a['url_visualizacao'],
+                        'Download PDF': a['url_download'],
+                        'Importado em': a['data_importacao'],
+                    }
+                    for a in atas_alesc
+                ]
+            )
+
+            st.dataframe(
+                df_atas,
+                hide_index=True,
+                width='stretch',
+                column_config={
+                    'Visualizacao': st.column_config.LinkColumn('Visualizacao', display_text='Abrir'),
+                    'Download PDF': st.column_config.LinkColumn('Download PDF', display_text='Baixar'),
+                },
+            )
+
+            primeira_ata = atas_alesc[0]
+            st.markdown("### Primeiro registro da pagina atual")
+
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.write(f"**Data do evento:** {primeira_ata.get('data_evento') or 'Nao informado'}")
+                st.write(f"**Local do evento:** {primeira_ata.get('local_evento') or 'Nao informado'}")
+                st.write(f"**Tipo de evento:** {primeira_ata.get('tipo_evento') or 'Nao informado'}")
+            with col_b:
+                st.write(f"**Ementa:** {primeira_ata.get('ementa') or 'Nao informado'}")
+                if primeira_ata.get('url_visualizacao'):
+                    st.markdown(f"[Visualizar no portal]({primeira_ata['url_visualizacao']})")
+                if primeira_ata.get('url_download'):
+                    st.markdown(f"[Download do PDF]({primeira_ata['url_download']})")
+
+            st.text_area(
+                'Conteudo da ata',
+                value=primeira_ata.get('conteudo_ata') or 'Conteudo nao extraido.',
+                height=380,
+            )
+
+        if st.button("🔄 Atualizar lista de atas", key="atualizar_atas_alesc"):
+            st.cache_data.clear()
+            st.rerun()
+
+    with tab_atas_plenarias_alesc:
         st.info(
-            "**Por quê rodar localmente?**\n\n"
-            "O site www.alesc.sc.gov.br bloqueia conexões de IPs fora do Brasil. "
-            "O script deve ser executado na sua máquina (IP brasileiro) e salvará os dados diretamente no banco PostgreSQL."
+            "Importacao de Atas Plenarias configurada para ler o Diario da ALESC "
+            "e importar apenas registros da 20a legislatura."
         )
-    else:
-        st.subheader(f"👤 Deputados Estaduais ({len(deputados_alesc)} encontrados)")
 
-        # Filtros
-        col_f1, col_f2 = st.columns([2, 1])
-        with col_f1:
-            busca = st.text_input("🔍 Buscar por nome", placeholder="Digite parte do nome...")
-        with col_f2:
-            partidos_disponiveis = sorted({d['partido'] for d in deputados_alesc if d['partido']})
-            partido_filtro = st.selectbox("Filtrar por partido", ["Todos"] + partidos_disponiveis)
+        if total_atas_plenarias_geral == 0:
+            st.warning(
+                "Nenhuma ata plenaria cadastrada ainda. "
+                "Execute o script local para importar os diarios:\n\n"
+                "```bash\n"
+                "python alesc_diario_plenario_scraper.py --max-sem-ata-sequencial 200\n"
+                "```"
+            )
+            st.info(
+                "O scraper percorre os diarios do mais recente para o mais antigo, "
+                "analisa apenas a secao de Atas de Sessoes Plenarias, importa a 20a legislatura "
+                "e para ao encontrar a 19a legislatura."
+            )
+        else:
+            st.subheader(f"🏛️ Atas Plenarias importadas ({total_atas_plenarias_geral} registro(s))")
 
-        # Aplicar filtros
-        lista_filtrada = deputados_alesc
-        if busca:
-            lista_filtrada = [d for d in lista_filtrada if busca.lower() in d['nome'].lower()]
-        if partido_filtro != "Todos":
-            lista_filtrada = [d for d in lista_filtrada if d['partido'] == partido_filtro]
+            col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+            with col_f1:
+                filtro_diario = st.text_input(
+                    'Filtrar por diario',
+                    placeholder='Ex: 9004',
+                    key='filtro_diario_atas_plenarias',
+                ).strip()
+            with col_f2:
+                filtro_numero_ata = st.text_input(
+                    'Filtrar por numero da ata',
+                    placeholder='Ex: 7',
+                    key='filtro_numero_ata_atas_plenarias',
+                ).strip()
+            with col_f3:
+                filtro_sessao_legislativa = st.selectbox(
+                    'Filtrar por sessao legislativa',
+                    [None] + sessoes_legislativas_plenarias,
+                    format_func=lambda valor: 'Todas' if valor is None else str(valor),
+                    key='filtro_sessao_legislativa_atas_plenarias',
+                )
+            with col_f4:
+                filtro_tipo_sessao = st.selectbox(
+                    'Filtrar por tipo de sessao',
+                    [None] + tipos_sessao_plenarias,
+                    format_func=lambda valor: 'Todas' if valor is None else str(valor),
+                    key='filtro_tipo_sessao_atas_plenarias',
+                )
 
-        st.markdown(f"*Exibindo {len(lista_filtrada)} deputado(s)*")
-        st.markdown("---")
+            total_atas_plenarias_filtradas = contar_atas_plenarias_alesc(
+                filtro_diario,
+                filtro_numero_ata,
+                filtro_sessao_legislativa,
+                filtro_tipo_sessao,
+            )
 
-        # Grid de cards (4 por linha)
-        cols_por_linha = 4
-        for i in range(0, len(lista_filtrada), cols_por_linha):
-            linha = lista_filtrada[i:i + cols_por_linha]
-            cols = st.columns(cols_por_linha)
-            for j, dep in enumerate(linha):
-                with cols[j]:
-                    if dep['foto_url']:
-                        st.image(dep['foto_url'], width=140)
-                    else:
-                        st.markdown(
-                            "<div style='width:140px;height:140px;background:#e0e0e0;"
-                            "border-radius:8px;display:flex;align-items:center;"
-                            "justify-content:center;font-size:40px;'>👤</div>",
-                            unsafe_allow_html=True
-                        )
-                    nome_exibicao = dep['nome']
-                    if dep['partido']:
-                        nome_exibicao = f"{dep['nome']} ({dep['partido']})"
-                    st.markdown(f"**{nome_exibicao}**")
-                    if dep['link_perfil']:
-                        st.markdown(f"[Ver perfil]({dep['link_perfil']})")
+            col_pag1, col_pag2, col_pag3 = st.columns([1, 1, 2])
+            with col_pag1:
+                itens_por_pagina_plenarias = st.selectbox(
+                    'Itens por pagina',
+                    [20, 50, 100],
+                    index=1,
+                    key='itens_por_pagina_atas_plenarias',
+                )
 
-        if st.button("🔄 Atualizar lista de deputados"):
+            total_paginas_plenarias = max(
+                1,
+                (total_atas_plenarias_filtradas + itens_por_pagina_plenarias - 1) // itens_por_pagina_plenarias,
+            )
+
+            with col_pag2:
+                pagina_plenarias = int(
+                    st.number_input(
+                        'Pagina',
+                        min_value=1,
+                        max_value=total_paginas_plenarias,
+                        value=min(
+                            st.session_state.get('pagina_atas_plenarias', 1),
+                            total_paginas_plenarias,
+                        ),
+                        step=1,
+                        key='pagina_atas_plenarias',
+                    )
+                )
+
+            if total_atas_plenarias_filtradas > 0:
+                inicio_plenarias = ((pagina_plenarias - 1) * itens_por_pagina_plenarias) + 1
+                fim_plenarias = min(
+                    pagina_plenarias * itens_por_pagina_plenarias,
+                    total_atas_plenarias_filtradas,
+                )
+            else:
+                inicio_plenarias = 0
+                fim_plenarias = 0
+
+            with col_pag3:
+                st.caption(
+                    f"Exibindo {inicio_plenarias}-{fim_plenarias} de {total_atas_plenarias_filtradas} registros "
+                    f"(pagina {pagina_plenarias} de {total_paginas_plenarias})."
+                )
+
+            col_m1, col_m2, col_m3 = st.columns(3)
+            with col_m1:
+                st.metric('Total geral', total_atas_plenarias_geral)
+            with col_m2:
+                st.metric('Total filtrado', total_atas_plenarias_filtradas)
+            with col_m3:
+                st.metric('Pagina atual', f'{pagina_plenarias}/{total_paginas_plenarias}')
+
+            if total_atas_plenarias_filtradas == 0:
+                st.warning('Nenhuma ata plenaria encontrada com os filtros informados.')
+            else:
+                atas_plenarias_pagina = carregar_atas_plenarias_alesc(
+                    pagina_plenarias,
+                    itens_por_pagina_plenarias,
+                    filtro_diario,
+                    filtro_numero_ata,
+                    filtro_sessao_legislativa,
+                    filtro_tipo_sessao,
+                )
+
+                st.markdown(
+                    f"*Exibindo {len(atas_plenarias_pagina)} registro(s) na pagina atual com os filtros aplicados.*"
+                )
+
+                df_atas_plenarias = pd.DataFrame(
+                    [
+                        {
+                            'Diario': a['diario_numero'],
+                            'Data Publicacao': a['diario_data_publicacao'],
+                            'Ata': a['numero_ata'],
+                            'Sessao Legislativa': a['sessao_legislativa'],
+                            'Legislatura': a['legislatura'],
+                            'Tipo Sessao': a['tipo_sessao'],
+                            'Titulo': (a['titulo_ata'][:160] + '...') if a['titulo_ata'] and len(a['titulo_ata']) > 160 else a['titulo_ata'],
+                            'Download Diario': a['diario_url_download'],
+                            'Importado em': a['data_importacao'],
+                        }
+                        for a in atas_plenarias_pagina
+                    ]
+                )
+
+                st.dataframe(
+                    df_atas_plenarias,
+                    hide_index=True,
+                    width='stretch',
+                    column_config={
+                        'Download Diario': st.column_config.LinkColumn('Download Diario', display_text='Baixar'),
+                    },
+                )
+
+                primeira_ata_plenaria = atas_plenarias_pagina[0]
+                st.markdown("### Primeiro registro da pagina atual")
+
+                col_p1, col_p2 = st.columns(2)
+                with col_p1:
+                    st.write(f"**Diario:** {primeira_ata_plenaria.get('diario_numero') or 'Nao informado'}")
+                    st.write(
+                        f"**Data de publicacao:** {primeira_ata_plenaria.get('diario_data_publicacao') or 'Nao informado'}"
+                    )
+                    st.write(f"**Numero da ata:** {primeira_ata_plenaria.get('numero_ata') or 'Nao informado'}")
+                    st.write(
+                        f"**Sessao legislativa:** {primeira_ata_plenaria.get('sessao_legislativa') or 'Nao informado'}"
+                    )
+                with col_p2:
+                    st.write(f"**Legislatura:** {primeira_ata_plenaria.get('legislatura') or 'Nao informado'}")
+                    st.write(f"**Tipo de sessao:** {primeira_ata_plenaria.get('tipo_sessao') or 'Nao informado'}")
+                    st.write(f"**Titulo:** {primeira_ata_plenaria.get('titulo_ata') or 'Nao informado'}")
+                    if primeira_ata_plenaria.get('diario_url_download'):
+                        st.markdown(f"[Download do diario]({primeira_ata_plenaria['diario_url_download']})")
+
+                st.text_area(
+                    'Conteudo da ata plenaria',
+                    value=primeira_ata_plenaria.get('conteudo_ata') or 'Conteudo nao extraido.',
+                    height=380,
+                )
+
+        if st.button("🔄 Atualizar lista de atas plenarias", key="atualizar_atas_plenarias_alesc"):
             st.cache_data.clear()
             st.rerun()
 

@@ -13,6 +13,7 @@ Este projeto fornece uma interface web interativa para explorar os dados abertos
 - **Eventos**: Eventos da Câmara
 - **Votações**: Histórico de votações e votos individuais
 - **Órgãos**: Órgãos da Câmara e seus membros
+- **ALESC**: Deputados estaduais e importadores de Atas
 
 ## 🚀 Instalação
 
@@ -47,6 +48,51 @@ streamlit run app.py
 
 A aplicação será aberta automaticamente no seu navegador padrão em `http://localhost:8501`
 
+### Importar Atas da ALESC (todas as paginas)
+
+No diretório do projeto, execute localmente:
+
+```powershell
+python alesc_atas_scraper.py
+```
+
+O script acessa a página de Atas da ALESC, percorre todas as páginas,
+baixa os anexos (PDF, DOC e DOCX), extrai o conteúdo e salva na tabela `doutorado.atas_alesc`.
+
+Por padrão, o scraper percorre todas as páginas disponíveis (atualmente 258) e
+evita duplicidades em reexecuções com chave única em `url_download`.
+
+Para testes rápidos:
+
+```powershell
+python alesc_atas_scraper.py --max-pages 5
+```
+
+### Importar Atas de Sessões Plenárias (Diário da ALESC)
+
+No diretório do projeto, execute:
+
+```powershell
+python alesc_diario_plenario_scraper.py
+```
+
+O script varre os Diários da ALESC do mais recente para o mais antigo, analisa
+apenas a seção de Atas de Sessões Plenárias, importa somente atas da 20ª
+legislatura e para ao encontrar atas da 19ª legislatura.
+
+Para evitar parada prematura em períodos com muitos diários sem ata plenária,
+o limite de segurança pode ser configurado:
+
+```powershell
+python alesc_diario_plenario_scraper.py --max-sem-ata-sequencial 200
+```
+
+Para testes rápidos:
+
+```powershell
+python alesc_diario_plenario_scraper.py --max-pages 10 --max-sem-ata-sequencial 200
+```
+
 ### Funcionalidades Principais
 
 #### 1. Deputados
@@ -73,6 +119,11 @@ A aplicação será aberta automaticamente no seu navegador padrão em `http://l
 - Liste os órgãos da Câmara
 - Consulte membros de cada órgão
 
+#### 6. ALESC
+- Visualize deputados estaduais importados no PostgreSQL
+- Importe e visualize Atas da ALESC (todas as páginas, com deduplicação)
+- Importe Atas de Sessões Plenárias via Diário da ALESC
+
 ## 📁 Estrutura do Projeto
 
 ```
@@ -80,6 +131,9 @@ camara-api/
 │
 ├── app.py              # Aplicação Streamlit (interface)
 ├── api_client.py       # Cliente para consumir a API REST
+├── alesc_scraper.py    # Scraper de deputados da ALESC
+├── alesc_atas_scraper.py # Scraper de todas as atas da ALESC (com leitura de PDF)
+├── alesc_diario_plenario_scraper.py # Scraper de atas plenárias no Diário da ALESC
 ├── requirements.txt    # Dependências do projeto
 └── README.md          # Este arquivo
 ```
