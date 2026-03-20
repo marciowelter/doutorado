@@ -21,6 +21,7 @@ import argparse
 import os
 import re
 import sys
+import unicodedata
 from datetime import datetime
 from io import BytesIO
 from urllib.parse import parse_qs, urljoin, urlparse
@@ -176,12 +177,172 @@ def _recortar_subsecao_plenaria(texto: str) -> str:
     if idx_atas < 0:
         return ''
 
-    m_sub = re.search(r'SESS[ÕO]ES?\s+PLEN[ÁA]RIAS?', upper[idx_atas:])
+    m_sub = re.search(r'SESS(?:[ÕO]ES?|[ÃA]O)\s+PLEN[ÁA]RIAS?', upper[idx_atas:])
     if not m_sub:
         return ''
 
     start = idx_atas + m_sub.start()
     return texto[start:]
+
+
+FOOTER_NOISE_TOKENS_ASCII = (
+    'DIARIO DA ASSEMBLEIA',
+    'DIARIO OFICIAL ASSINADO',
+    'REDACOES PUBLICADAS',
+)
+
+SECTION_HEADING_COMPACT_TOKENS = (
+    'COMISSOESPERMANENTES',
+    'COMISSAOPERMANENTE',
+    'ATOSDAPRESIDENCIA',
+    'ATOSDAMESA',
+    'CADERNOADMINISTRATIVO',
+    'PROPOSICOESDEORIGEMDOLEGISLATIVO',
+    'PROPOSICOES',
+    'MENSAGENSGOVERNAMENTAIS',
+    'COMUNICACOESPARLAMENTARES',
+    'REDACOESFINAIS',
+    'ORDEMDODIA',
+    'PEQUENOEXPEDIENTE',
+    'GRANDEEXPEDIENTE',
+    'JUSTIFICACAO',
+)
+
+ATA_REUNIAO_HEADER_RE = re.compile(
+    r'\bATA\s+DA\s+\d{1,4}\s*[A]?\s+REUNIAO\b.*\bCOMISSAO\b',
+    flags=re.IGNORECASE,
+)
+
+SECTION_START_FALLBACK_PATTERNS = (
+    re.compile(r'(?im)^\s*C\s*A\s*D\s*E\s*R\s*N\s*O\s+A\s*D\s*M\s*I\s*N\s*I\s*S\s*T\s*R\s*A\s*T'),
+    re.compile(r'(?im)^\s*A\s*T\s*O\s*S?\s+D\s*A\s+(?:P\s*R\s*E\s*S\s*I\s*D|M\s*E\s*S\s*A)'),
+    re.compile(r'(?im)^\s*C\s*O\s*M\s*I\s*S\s*S\s*O?\s*E?\s*S?\s+P\s*E\s*R\s*M\s*A\s*N\s*E\s*N\s*T'),
+    re.compile(r'(?im)^\s*P\s*R\s*O\s*P\s*O\s*S\s*I'),
+    re.compile(r'(?im)^\s*M\s*E\s*N\s*S\s*A\s*G\s*E\s*N'),
+    re.compile(r'(?im)^\s*C\s*O\s*M\s*U\s*N\s*I\s*C\s*A'),
+    re.compile(r'(?im)^\s*R\s*E\s*D\s*A'),
+    re.compile(r'(?im)^\s*ATA\s+DA\s+\d{1,4}\s*[ªA]?\s+REUNI\S*'),
+)
+
+ENCERRAMENTO_SESSAO_PATTERNS = (
+    re.compile(r'EST[ÁA]\s+ENCERRADA\s+A\s+SESS[ÃA]O', flags=re.IGNORECASE),
+    re.compile(r'DECLARO\s+ENCERRADA\s+A\s+SESS[ÃA]O', flags=re.IGNORECASE),
+    re.compile(r'ENCERRADA\s+A\s+SESS[ÃA]O', flags=re.IGNORECASE),
+    re.compile(r'NADA\s+MAIS\s+HAVENDO\s+A\s+TRATAR', flags=re.IGNORECASE),
+)
+
+SECTION_START_INLINE_PATTERNS = (
+    re.compile(r'C\s*A\s*D\s*E\s*R\s*N\s*O\s+A\s*D\s*M\s*I\s*N\s*I\s*S\s*T\s*R\s*A\s*T', flags=re.IGNORECASE),
+    re.compile(r'A\s*T\s*O\s*S?\s+D\s*A\s+(?:P\s*R\s*E\s*S\s*I\s*D|M\s*E\s*S\s*A)', flags=re.IGNORECASE),
+    re.compile(r'C\s*O\s*M\s*I\s*S\s*S\s*O?\s*E?\s*S?\s+P\s*E\s*R\s*M\s*A\s*N\s*E\s*N\s*T', flags=re.IGNORECASE),
+    re.compile(r'P\s*R\s*O\s*P\s*O\s*S\s*I', flags=re.IGNORECASE),
+    re.compile(r'M\s*E\s*N\s*S\s*A\s*G\s*E\s*N', flags=re.IGNORECASE),
+    re.compile(r'C\s*O\s*M\s*U\s*N\s*I\s*C\s*A', flags=re.IGNORECASE),
+    re.compile(r'R\s*E\s*D\s*A', flags=re.IGNORECASE),
+    re.compile(r'ATA\s+DA\s+\d{1,4}\s*[ªA]?\s+REUNI\S*.*?\bCOMISS[ÃA]O\b', flags=re.IGNORECASE),
+)
+
+
+def _to_ascii_upper(texto: str) -> str:
+    texto = texto or ''
+    ascii_texto = unicodedata.normalize('NFKD', texto).encode('ascii', 'ignore').decode('ascii')
+    return _normalizar_texto(ascii_texto).upper()
+
+
+def _compact_letters_ascii(texto: str) -> str:
+    return re.sub(r'[^A-Z]', '', _to_ascii_upper(texto))
+
+
+def _linha_parece_inicio_nova_secao(linha: str) -> bool:
+    """Heurística para detectar início de seção posterior ao bloco de atas plenárias."""
+    linha_bruta = _normalizar_texto(linha)
+    if not linha_bruta:
+        return False
+
+    linha_ascii = _to_ascii_upper(linha_bruta)
+    letras_ascii = re.sub(r'[^A-Z]', '', linha_ascii)
+    if len(letras_ascii) < 6:
+        return False
+
+    # Mantém apenas linhas majoritariamente em caixa alta no texto original.
+    letras_orig = [ch for ch in linha_bruta if ch.isalpha()]
+    qtd_upper = sum(1 for ch in letras_orig if ch.isupper())
+    if letras_orig and (qtd_upper / len(letras_orig)) < 0.60:
+        return False
+
+    if len(linha_ascii) < 8 or len(linha_ascii) > 260:
+        return False
+
+    if any(token in linha_ascii for token in FOOTER_NOISE_TOKENS_ASCII):
+        return False
+
+    # Evita cortar em linhas de assinatura com muitos nomes.
+    if linha_ascii.count(' - ') >= 2:
+        return False
+
+    if ATA_REUNIAO_HEADER_RE.search(linha_ascii):
+        return True
+
+    linha_compact = re.sub(r'[^A-Z]', '', linha_ascii)
+    return any(token in linha_compact for token in SECTION_HEADING_COMPACT_TOKENS)
+
+
+def _encontrar_fim_ultima_ata(subsecao: str, inicio_ata: int) -> int:
+    """
+    Para a última ata plenária do diário, corta no primeiro cabeçalho de seção posterior.
+    Se não encontrar marcador confiável, mantém até o fim da subsecao.
+    """
+    if not subsecao:
+        return inicio_ata
+
+    if inicio_ata >= len(subsecao):
+        return len(subsecao)
+
+    # Evita cortar no cabeçalho inicial da própria ata, mas sem pular transições
+    # de seção muito próximas do fim da ata (casos limítrofes no OCR/PDF).
+    busca_min = min(len(subsecao), inicio_ata + 1000)
+
+    # 1) Prioriza transição explícita de encerramento da sessão para uma nova seção,
+    # inclusive quando o PDF concatenar tudo na mesma linha.
+    cauda = subsecao[busca_min:]
+    cortes = []
+    janela_max = 12000
+    for enc_pat in ENCERRAMENTO_SESSAO_PATTERNS:
+        for m_enc in enc_pat.finditer(cauda):
+            # Procura marcadores de nova seção logo após o encerramento.
+            janela = cauda[m_enc.end():m_enc.end() + janela_max]
+            for sec_pat in SECTION_START_INLINE_PATTERNS:
+                m_sec = sec_pat.search(janela)
+                if m_sec:
+                    cortes.append(busca_min + m_enc.end() + m_sec.start())
+
+    if cortes:
+        return min(cortes)
+
+    # 2) Heurística por linhas em caixa alta.
+    pos = 0
+    for linha in subsecao.splitlines(keepends=True):
+        inicio_linha = pos
+        pos += len(linha)
+
+        if inicio_linha < busca_min:
+            continue
+
+        if _linha_parece_inicio_nova_secao(linha):
+            return inicio_linha
+
+    # 3) Fallback: busca direta por padrões de início de seção em modo multiline.
+    cauda = subsecao[busca_min:]
+    cortes = []
+    for pattern in SECTION_START_FALLBACK_PATTERNS:
+        m = pattern.search(cauda)
+        if m:
+            cortes.append(busca_min + m.start())
+
+    if cortes:
+        return min(cortes)
+
+    return len(subsecao)
 
 
 ATA_HEADER_RE = re.compile(
@@ -223,7 +384,12 @@ def _extrair_atas_da_subsecao(subsecao: str) -> list[dict]:
     atas = []
     for i, m in enumerate(matches):
         start = m.start()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(subsecao)
+        if i + 1 < len(matches):
+            end = matches[i + 1].start()
+        else:
+            end = _encontrar_fim_ultima_ata(subsecao, start)
+        if end <= start:
+            end = len(subsecao)
         conteudo = _normalizar_texto(subsecao[start:end])
 
         numero_ata = int(m.group(1))
@@ -256,6 +422,10 @@ def _conectar_banco():
         database='banco',
         connect_timeout=15,
         sslmode='require',
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=5,
     )
 
 
@@ -279,17 +449,12 @@ def _preparar_tabela(conn, cur) -> None:
     )
 
     # Adicionar coluna tipo_sessao se não existir
-    try:
-        cur.execute(
-            """
-            ALTER TABLE doutorado.atas_sessoes_plenarias_alesc
-            ADD COLUMN tipo_sessao VARCHAR(50)
-            """
-        )
-        conn.commit()
-    except Exception:
-        # Coluna já existe, faz rollback e continua
-        conn.rollback()
+    cur.execute(
+        """
+        ALTER TABLE doutorado.atas_sessoes_plenarias_alesc
+        ADD COLUMN IF NOT EXISTS tipo_sessao VARCHAR(50)
+        """
+    )
 
     cur.execute(
         """
@@ -400,7 +565,7 @@ def importar_atas_plenarias(
 
                 if stats['sem_ata_sequencial'] >= max_sem_ata_sequencial:
                     stop_reason = (
-                        f'Parada por seguranca: {max_sem_ata_sequencial} diarios sequenciais sem encontrar ata.'
+                        f'Parada por seguranca: {max_sem_ata_sequencial} diarios sequenciais sem encontrar ata da {TARGET_LEGISLATURA}ª legislatura.'
                     )
                     break
                 continue
@@ -408,23 +573,18 @@ def importar_atas_plenarias(
             subsecao = _recortar_subsecao_plenaria(texto_pdf)
             atas = _extrair_atas_da_subsecao(subsecao)
 
-            if not atas:
-                stats['sem_ata_sequencial'] += 1
-            else:
-                stats['sem_ata_sequencial'] = 0
-
             stats['atas_identificadas'] += len(atas)
 
-            encontrou_leg_19 = False
+            atas_alvo_no_diario = 0
             for ata in atas:
                 if ata['legislatura'] == STOP_LEGISLATURA:
                     stats['atas_19_leg'] += 1
-                    encontrou_leg_19 = True
                     continue
 
                 if ata['legislatura'] != TARGET_LEGISLATURA:
                     continue
 
+                atas_alvo_no_diario += 1
                 stats['atas_20_leg'] += 1
 
                 registro = {
@@ -435,6 +595,7 @@ def importar_atas_plenarias(
                     'sessao_legislativa': ata['sessao_legislativa'],
                     'legislatura': ata['legislatura'],
                     'titulo_ata': ata['titulo_ata'],
+                    'tipo_sessao': ata['tipo_sessao'],
                     'conteudo_ata': ata['conteudo_ata'],
                 }
 
@@ -444,12 +605,10 @@ def importar_atas_plenarias(
                 else:
                     stats['atas_duplicadas'] += 1
 
-            if encontrou_leg_19:
-                stop_reason = (
-                    f'Parada ao encontrar ata da {STOP_LEGISLATURA}ª legislatura '
-                    f'(diario {numero_diario}).'
-                )
-                break
+            if atas_alvo_no_diario == 0:
+                stats['sem_ata_sequencial'] += 1
+            else:
+                stats['sem_ata_sequencial'] = 0
 
             marco_atual = (stats['atas_inseridas'] // 20) * 20
             if marco_atual > 0 and marco_atual > ultimo_marco_commit:
@@ -459,7 +618,7 @@ def importar_atas_plenarias(
 
             if stats['sem_ata_sequencial'] >= max_sem_ata_sequencial:
                 stop_reason = (
-                    f'Parada por seguranca: {max_sem_ata_sequencial} diarios sequenciais sem encontrar ata.'
+                    f'Parada por seguranca: {max_sem_ata_sequencial} diarios sequenciais sem encontrar ata da {TARGET_LEGISLATURA}ª legislatura.'
                 )
                 break
 
