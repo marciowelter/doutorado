@@ -456,11 +456,35 @@ def _preparar_tabela(conn, cur) -> None:
         """
     )
 
+    # Migracao: substituir indice unico antigo (com diario_numero) pelo novo (sem diario_numero).
+    # Isso permite que a logica de upsert identifique a mesma ata publicada em diarios diferentes.
     cur.execute(
         """
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_atas_plenarias_diario_ata
+        SELECT 1 FROM pg_indexes
+        WHERE schemaname = 'doutorado'
+          AND tablename = 'atas_sessoes_plenarias_alesc'
+          AND indexname = 'uq_atas_plenarias_diario_ata'
+        """
+    )
+    if cur.fetchone():
+        # Deduplica: para cada (numero_ata, sessao_legislativa, legislatura),
+        # mantém apenas o registro com o maior diario_numero (publicacao mais recente).
+        cur.execute(
+            """
+            DELETE FROM doutorado.atas_sessoes_plenarias_alesc
+            WHERE id NOT IN (
+                SELECT DISTINCT ON (numero_ata, sessao_legislativa, legislatura) id
+                FROM doutorado.atas_sessoes_plenarias_alesc
+                ORDER BY numero_ata, sessao_legislativa, legislatura, diario_numero DESC
+            )
+            """
+        )
+        cur.execute('DROP INDEX IF EXISTS doutorado.uq_atas_plenarias_diario_ata')
+
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_atas_plenarias_sessao_ata
         ON doutorado.atas_sessoes_plenarias_alesc (
-            diario_numero,
             numero_ata,
             sessao_legislativa,
             legislatura
@@ -469,7 +493,61 @@ def _preparar_tabela(conn, cur) -> None:
     )
 
 
-def _inserir_ata(cur, registro: dict) -> bool:
+def _inserir_ata(cur, registro: dict) -> str:
+    """
+    Insere ou atualiza uma ata plenaria no banco.
+
+    Regras:
+    - Se a ata nao existe (por numero_ata + sessao_legislativa + legislatura): insere.
+    - Se existe e o novo diario tem numero MAIOR: substitui (atualiza).
+    - Se existe e o novo diario tem numero igual ou menor: ignora.
+
+    Retorna: 'inserida', 'atualizada' ou 'duplicada'.
+    """
+    cur.execute(
+        """
+        SELECT id, diario_numero
+        FROM doutorado.atas_sessoes_plenarias_alesc
+        WHERE numero_ata = %s
+          AND sessao_legislativa = %s
+          AND legislatura = %s
+        """,
+        (
+            registro.get('numero_ata'),
+            registro.get('sessao_legislativa'),
+            registro.get('legislatura'),
+        ),
+    )
+    existente = cur.fetchone()
+
+    if existente is not None:
+        id_existente, diario_existente = existente
+        if registro.get('diario_numero', 0) > diario_existente:
+            cur.execute(
+                """
+                UPDATE doutorado.atas_sessoes_plenarias_alesc SET
+                    diario_numero = %s,
+                    diario_data_publicacao = %s,
+                    diario_url_download = %s,
+                    titulo_ata = %s,
+                    conteudo_ata = %s,
+                    tipo_sessao = %s,
+                    data_importacao = NOW()
+                WHERE id = %s
+                """,
+                (
+                    registro.get('diario_numero'),
+                    registro.get('diario_data_publicacao'),
+                    registro.get('diario_url_download'),
+                    registro.get('titulo_ata'),
+                    registro.get('conteudo_ata'),
+                    registro.get('tipo_sessao'),
+                    id_existente,
+                ),
+            )
+            return 'atualizada'
+        return 'duplicada'
+
     cur.execute(
         """
         INSERT INTO doutorado.atas_sessoes_plenarias_alesc (
@@ -484,8 +562,6 @@ def _inserir_ata(cur, registro: dict) -> bool:
             tipo_sessao
         )
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (diario_numero, numero_ata, sessao_legislativa, legislatura) DO NOTHING
-        RETURNING id
         """,
         (
             registro.get('diario_numero'),
@@ -499,7 +575,145 @@ def _inserir_ata(cur, registro: dict) -> bool:
             registro.get('tipo_sessao'),
         ),
     )
-    return cur.fetchone() is not None
+    return 'inserida'
+
+
+def importar_atas_faixa_diarios(
+    diario_inicio: int,
+    diario_fim: int,
+    callback_progresso=None,
+) -> dict:
+    """
+    Importa/atualiza atas de uma faixa especifica de numeros de diario.
+
+    Para cada diario na faixa:
+    - Se a ata nao existe no banco: insere.
+    - Se existe e o diario novo tem numero maior: substitui (atualiza).
+    - Se existe e o diario novo tem numero igual ou menor: ignora.
+
+    Parametros:
+        diario_inicio: numero do diario inicial da faixa (inclusive).
+        diario_fim: numero do diario final da faixa (inclusive).
+        callback_progresso: funcao opcional f(msg: str) chamada a cada mensagem de log.
+
+    Retorna dict com: diarios_processados, atas_identificadas, atas_inseridas,
+    atas_atualizadas, atas_duplicadas, falhas_download_pdf, mensagens.
+    """
+    conn = _conectar_banco()
+    cur = conn.cursor()
+    _preparar_tabela(conn, cur)
+    conn.commit()
+
+    stats: dict = {
+        'diarios_processados': 0,
+        'atas_identificadas': 0,
+        'atas_inseridas': 0,
+        'atas_atualizadas': 0,
+        'atas_duplicadas': 0,
+        'falhas_download_pdf': 0,
+        'mensagens': [],
+    }
+
+    def _log(msg: str) -> None:
+        stats['mensagens'].append(msg)
+        print(msg)
+        if callback_progresso:
+            callback_progresso(msg)
+
+    _log(f'Iniciando varredura da faixa de diarios: {diario_inicio} ate {diario_fim}')
+
+    soup = _get_soup(LIST_URL)
+    if not soup:
+        _log('ERRO: Nao foi possivel acessar o portal de listagem.')
+        cur.close()
+        conn.close()
+        return stats
+
+    total_paginas = _descobrir_total_paginas(soup)
+    _log(f'Total de paginas no portal: {total_paginas}')
+
+    for pagina in range(1, total_paginas + 1):
+        if pagina == 1:
+            pagina_soup = soup
+        else:
+            pagina_soup = _get_soup(f'{LIST_URL}?page={pagina}')
+            if not pagina_soup:
+                continue
+
+        diarios = _extrair_diarios_pagina(pagina_soup)
+        if not diarios:
+            continue
+
+        numeros = [d['numero_diario'] for d in diarios]
+        min_num = min(numeros)
+        max_num = max(numeros)
+
+        # Todos os diarios desta pagina estao acima da faixa: continua (proxima pagina)
+        if min_num > diario_fim:
+            continue
+        # Todos os diarios desta pagina estao abaixo da faixa: encerra a busca
+        if max_num < diario_inicio:
+            break
+
+        for diario in diarios:
+            numero_diario = diario['numero_diario']
+            if numero_diario < diario_inicio or numero_diario > diario_fim:
+                continue
+
+            url_pdf = diario['download_url']
+            _log(f'  Processando diario {numero_diario}...')
+
+            try:
+                pdf_bytes = _baixar_pdf(url_pdf)
+                texto_pdf = _extrair_texto_pdf(pdf_bytes)
+            except Exception as exc:
+                stats['falhas_download_pdf'] += 1
+                _log(f'  [FALHA] Diario {numero_diario}: {exc}')
+                continue
+
+            subsecao = _recortar_subsecao_plenaria(texto_pdf)
+            atas = _extrair_atas_da_subsecao(subsecao)
+            stats['atas_identificadas'] += len(atas)
+
+            for ata in atas:
+                if ata['legislatura'] != TARGET_LEGISLATURA:
+                    continue
+
+                registro = {
+                    'diario_numero': numero_diario,
+                    'diario_data_publicacao': diario['data_publicacao'],
+                    'diario_url_download': url_pdf,
+                    'numero_ata': ata['numero_ata'],
+                    'sessao_legislativa': ata['sessao_legislativa'],
+                    'legislatura': ata['legislatura'],
+                    'titulo_ata': ata['titulo_ata'],
+                    'tipo_sessao': ata['tipo_sessao'],
+                    'conteudo_ata': ata['conteudo_ata'],
+                }
+
+                resultado = _inserir_ata(cur, registro)
+                if resultado == 'inserida':
+                    stats['atas_inseridas'] += 1
+                    _log(f'    [INSERIDA] Ata {ata["numero_ata"]} do diario {numero_diario}')
+                elif resultado == 'atualizada':
+                    stats['atas_atualizadas'] += 1
+                    _log(f'    [ATUALIZADA] Ata {ata["numero_ata"]} - diario substituido por {numero_diario}')
+                else:
+                    stats['atas_duplicadas'] += 1
+
+            stats['diarios_processados'] += 1
+            conn.commit()
+
+    cur.close()
+    conn.close()
+
+    _log(
+        f'Varredura concluida: {stats["diarios_processados"]} diario(s) processado(s), '
+        f'{stats["atas_inseridas"]} inserida(s), {stats["atas_atualizadas"]} atualizada(s), '
+        f'{stats["atas_duplicadas"]} ja existente(s) sem alteracao, '
+        f'{stats["falhas_download_pdf"]} falha(s).'
+    )
+    return stats
 
 
 def importar_atas_plenarias(
@@ -528,6 +742,7 @@ def importar_atas_plenarias(
         'atas_20_leg': 0,
         'atas_19_leg': 0,
         'atas_inseridas': 0,
+        'atas_atualizadas': 0,
         'atas_duplicadas': 0,
         'falhas_download_pdf': 0,
         'sem_ata_sequencial': 0,
@@ -599,9 +814,11 @@ def importar_atas_plenarias(
                     'conteudo_ata': ata['conteudo_ata'],
                 }
 
-                inserida = _inserir_ata(cur, registro)
-                if inserida:
+                resultado = _inserir_ata(cur, registro)
+                if resultado == 'inserida':
                     stats['atas_inseridas'] += 1
+                elif resultado == 'atualizada':
+                    stats['atas_atualizadas'] += 1
                 else:
                     stats['atas_duplicadas'] += 1
 
@@ -636,6 +853,7 @@ def importar_atas_plenarias(
     print(f"- Atas da 20ª legislatura encontradas: {stats['atas_20_leg']}")
     print(f"- Atas da 19ª legislatura encontradas: {stats['atas_19_leg']}")
     print(f"- Inseridas: {stats['atas_inseridas']}")
+    print(f"- Atualizadas (diario mais recente): {stats['atas_atualizadas']}")
     print(f"- Duplicadas ignoradas: {stats['atas_duplicadas']}")
     print(f"- Falhas de diario/PDF: {stats['falhas_download_pdf']}")
     print(f"- Sem ata sequencial (contador final): {stats['sem_ata_sequencial']}")

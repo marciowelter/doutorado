@@ -11,6 +11,8 @@ from dotenv import load_dotenv
 import psycopg2
 from psycopg2 import OperationalError
 import requests
+import re
+import subprocess
 import xml.etree.ElementTree as ET
 from urllib.parse import urljoin, urlparse, urlunparse
 
@@ -20,6 +22,8 @@ if 'api_client' in sys.modules:
 
 from api_client import CamaraAPIClient
 from datetime import datetime, timedelta
+import alesc_diario_plenario_scraper as _diario_scraper
+import alesc_noticias_deputados_scraper as _noticias_deputados_scraper
 
 # Carregar variáveis de ambiente
 load_dotenv()
@@ -1826,14 +1830,237 @@ elif opcao == "__ALESC__":
         except Exception:
             return []
 
+    def _montar_filtro_noticias_deputados_alesc(
+        filtro_titulo: str,
+        filtro_deputado_id: int | None,
+        filtro_data_inicio,
+        filtro_data_fim,
+    ):
+        where = []
+        params = []
+
+        if filtro_titulo:
+            where.append("n.titulo ILIKE %s")
+            params.append(f"%{filtro_titulo}%")
+
+        if filtro_deputado_id is not None:
+            where.append("n.deputado_id = %s")
+            params.append(filtro_deputado_id)
+
+        if filtro_data_inicio is not None:
+            where.append("n.data_materia >= %s")
+            params.append(filtro_data_inicio)
+
+        if filtro_data_fim is not None:
+            where.append("n.data_materia <= %s")
+            params.append(filtro_data_fim)
+
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        return where_sql, params
+
+    @st.cache_data(ttl=3600)
+    def carregar_filtro_deputados_noticias_alesc():
+        try:
+            conn = conectar_postgresql_banco_alesc()
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT DISTINCT d.id, d.nome, d.partido
+                FROM doutorado.noticias_deputados_alesc n
+                JOIN doutorado.deputados_alesc d ON d.id = n.deputado_id
+                ORDER BY d.nome
+                """
+            )
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+            return [
+                {
+                    'id': r[0],
+                    'nome': r[1],
+                    'partido': r[2],
+                }
+                for r in rows
+            ]
+        except Exception:
+            return []
+
+    @st.cache_data(ttl=3600)
+    def contar_noticias_deputados_alesc(
+        filtro_titulo: str = '',
+        filtro_deputado_id: int | None = None,
+        filtro_data_inicio=None,
+        filtro_data_fim=None,
+    ):
+        try:
+            where_sql, params = _montar_filtro_noticias_deputados_alesc(
+                filtro_titulo,
+                filtro_deputado_id,
+                filtro_data_inicio,
+                filtro_data_fim,
+            )
+
+            conn = conectar_postgresql_banco_alesc()
+            cur = conn.cursor()
+            cur.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM doutorado.noticias_deputados_alesc n
+                LEFT JOIN doutorado.deputados_alesc d ON d.id = n.deputado_id
+                {where_sql}
+                """,
+                params,
+            )
+            total = cur.fetchone()[0]
+            cur.close()
+            conn.close()
+            return total
+        except Exception:
+            return 0
+
+    @st.cache_data(ttl=3600)
+    def carregar_noticias_deputados_alesc(
+        pagina: int,
+        itens_por_pagina: int,
+        filtro_titulo: str = '',
+        filtro_deputado_id: int | None = None,
+        filtro_data_inicio=None,
+        filtro_data_fim=None,
+    ):
+        try:
+            where_sql, params = _montar_filtro_noticias_deputados_alesc(
+                filtro_titulo,
+                filtro_deputado_id,
+                filtro_data_inicio,
+                filtro_data_fim,
+            )
+            offset = (pagina - 1) * itens_por_pagina
+
+            conn = conectar_postgresql_banco_alesc()
+            cur = conn.cursor()
+            cur.execute(
+                f"""
+                SELECT
+                    n.id,
+                    n.data_materia,
+                    n.titulo,
+                    n.url_materia,
+                    n.conteudo_noticia,
+                    n.data_importacao,
+                    d.nome AS deputado_nome,
+                    d.partido AS deputado_partido
+                FROM doutorado.noticias_deputados_alesc n
+                LEFT JOIN doutorado.deputados_alesc d ON d.id = n.deputado_id
+                {where_sql}
+                ORDER BY n.data_materia DESC NULLS LAST, n.id DESC
+                LIMIT %s OFFSET %s
+                """,
+                params + [itens_por_pagina, offset],
+            )
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+
+            noticias = []
+            for r in rows:
+                noticias.append(
+                    {
+                        'id': r[0],
+                        'data_materia': r[1].strftime('%d/%m/%Y') if r[1] else None,
+                        'titulo': r[2],
+                        'url_materia': r[3],
+                        'conteudo_noticia': r[4],
+                        'data_importacao': r[5].strftime('%d/%m/%Y %H:%M:%S') if r[5] else None,
+                        'deputado_nome': r[6],
+                        'deputado_partido': r[7],
+                    }
+                )
+            return noticias
+        except Exception:
+            return []
+
+    def _extrair_estatisticas_import_noticias_alesc(log_texto: str) -> dict:
+        stats = {
+            'scrolls_executados': 0,
+            'urls_descobertas': 0,
+            'noticias_analisadas': 0,
+            'noticias_inseridas': 0,
+            'noticias_duplicadas': 0,
+            'noticias_sem_deputado': 0,
+            'falhas_extracao_materia': 0,
+            'duracao_segundos': 0.0,
+            'motivo_parada': '',
+            'mensagens': [ln for ln in log_texto.splitlines() if ln.strip()],
+        }
+
+        metricas = {
+            'scrolls_executados': r'-\s*Scrolls executados:\s*(\d+)',
+            'urls_descobertas': r'-\s*URLs descobertas:\s*(\d+)',
+            'noticias_analisadas': r'-\s*Noticias analisadas:\s*(\d+)',
+            'noticias_inseridas': r'-\s*Inseridas:\s*(\d+)',
+            'noticias_duplicadas': r'-\s*Duplicadas:\s*(\d+)',
+            'noticias_sem_deputado': r'-\s*Sem vinculo de deputado:\s*(\d+)',
+            'falhas_extracao_materia': r'-\s*Falhas de extracao:\s*(\d+)',
+        }
+
+        for campo, pattern in metricas.items():
+            m = re.search(pattern, log_texto)
+            if m:
+                stats[campo] = int(m.group(1))
+
+        m_duracao = re.search(r'-\s*Duracao \(s\):\s*([0-9]+(?:\.[0-9]+)?)', log_texto)
+        if m_duracao:
+            stats['duracao_segundos'] = float(m_duracao.group(1))
+
+        m_motivo = re.search(r'-\s*Motivo de parada:\s*(.+)', log_texto)
+        if m_motivo:
+            stats['motivo_parada'] = m_motivo.group(1).strip()
+
+        return stats
+
+    def executar_importacao_noticias_deputados_alesc(
+        max_duplicadas_sequenciais: int,
+        max_scroll_sem_novidades: int,
+    ) -> dict:
+        script_path = os.path.abspath(_noticias_deputados_scraper.__file__)
+        cmd = [
+            sys.executable,
+            script_path,
+            '--max-duplicadas-sequenciais',
+            str(max_duplicadas_sequenciais),
+            '--max-scroll-sem-novidades',
+            str(max_scroll_sem_novidades),
+        ]
+
+        proc = subprocess.run(
+            cmd,
+            cwd=os.path.dirname(script_path),
+            capture_output=True,
+            text=True,
+        )
+
+        log_texto = ((proc.stdout or '') + '\n' + (proc.stderr or '')).strip()
+
+        if proc.returncode != 0:
+            ultimas_linhas = '\n'.join(log_texto.splitlines()[-40:]) if log_texto else 'Sem detalhes no log.'
+            raise RuntimeError(
+                'Falha ao importar noticias dos deputados via subprocesso.\n'
+                f'Codigo de saida: {proc.returncode}\n'
+                f'Log:\n{ultimas_linhas}'
+            )
+
+        return _extrair_estatisticas_import_noticias_alesc(log_texto)
+
     deputados_alesc = carregar_deputados_alesc()
     total_atas_alesc = contar_atas_alesc()
     total_atas_plenarias_geral = contar_atas_plenarias_alesc()
     sessoes_legislativas_plenarias = carregar_sessoes_legislativas_plenarias_alesc()
     tipos_sessao_plenarias = carregar_tipos_sessao_plenarias_alesc()
+    total_noticias_deputados_alesc = contar_noticias_deputados_alesc()
+    deputados_com_noticias_alesc = carregar_filtro_deputados_noticias_alesc()
 
-    tab_deputados_alesc, tab_atas_alesc, tab_atas_plenarias_alesc = st.tabs(
-        ["👤 Deputados Estaduais", "📝 Atas", "🏛️ Atas Plenarias"]
+    tab_deputados_alesc, tab_atas_alesc, tab_atas_plenarias_alesc, tab_noticias_deputados_alesc = st.tabs(
+        ["👤 Deputados Estaduais", "📝 Atas", "🏛️ Atas Plenarias", "📰 Noticias Deputados"]
     )
 
     with tab_deputados_alesc:
@@ -2179,6 +2406,301 @@ elif opcao == "__ALESC__":
                 )
 
         if st.button("🔄 Atualizar lista de atas plenarias", key="atualizar_atas_plenarias_alesc"):
+            st.cache_data.clear()
+            st.rerun()
+
+        st.markdown("---")
+        st.subheader("🔍 Varredura de Diários - Importar / Atualizar")
+        st.caption(
+            "Informe uma faixa de números de diário para processar. "
+            "Atas novas serão inseridas; atas já existentes serão substituídas "
+            "apenas se o novo diário tiver número maior (publicação mais recente). "
+            "Use para capturar os diários gerados diariamente sem precisar rodar o scraper completo."
+        )
+
+        col_v1, col_v2, col_v3 = st.columns([2, 2, 3])
+        with col_v1:
+            varredura_inicio = st.number_input(
+                "Diário início",
+                min_value=1,
+                value=st.session_state.get('varredura_diario_inicio', 9000),
+                step=1,
+                key='varredura_diario_inicio',
+            )
+        with col_v2:
+            varredura_fim = st.number_input(
+                "Diário fim",
+                min_value=1,
+                value=st.session_state.get('varredura_diario_fim', 9100),
+                step=1,
+                key='varredura_diario_fim',
+            )
+        with col_v3:
+            st.write("")
+            st.write("")
+            iniciar_varredura = st.button(
+                "🔍 Iniciar Varredura",
+                key="btn_varredura_diarios",
+                use_container_width=True,
+            )
+
+        if iniciar_varredura:
+            d_ini = int(varredura_inicio)
+            d_fim = int(varredura_fim)
+            if d_ini > d_fim:
+                st.error("O diário início deve ser menor ou igual ao diário fim.")
+            else:
+                with st.spinner(f"Varrendo diários {d_ini} a {d_fim}... (pode levar alguns minutos)"):
+                    try:
+                        resultado = _diario_scraper.importar_atas_faixa_diarios(
+                            diario_inicio=d_ini,
+                            diario_fim=d_fim,
+                        )
+                        st.session_state['varredura_resultado'] = resultado
+                        if resultado['atas_inseridas'] + resultado['atas_atualizadas'] > 0:
+                            st.cache_data.clear()
+                            st.rerun()
+                    except Exception as exc:
+                        st.session_state['varredura_resultado'] = {'erro': str(exc)}
+
+        if 'varredura_resultado' in st.session_state:
+            res = st.session_state['varredura_resultado']
+            if 'erro' in res:
+                st.error(f"Erro durante a varredura: {res['erro']}")
+            else:
+                total_mod = res['atas_inseridas'] + res['atas_atualizadas']
+                if total_mod > 0:
+                    st.success(
+                        f"✅ Varredura concluída: {res['diarios_processados']} diário(s) processado(s) — "
+                        f"{res['atas_inseridas']} ata(s) inserida(s), "
+                        f"{res['atas_atualizadas']} ata(s) atualizada(s), "
+                        f"{res['atas_duplicadas']} já existente(s) sem alteração."
+                    )
+                else:
+                    st.info(
+                        f"Varredura concluída: {res['diarios_processados']} diário(s) processado(s). "
+                        "Nenhuma ata nova ou atualização encontrada."
+                    )
+                if res.get('mensagens'):
+                    with st.expander("📋 Log da varredura"):
+                        st.text('\n'.join(res['mensagens']))
+
+    with tab_noticias_deputados_alesc:
+        st.info(
+            "Importacao de noticias dos deputados com scroll dinamico no portal da ALESC, "
+            "deduplicacao por URL e parada automatica apos 20 duplicadas consecutivas (configuravel)."
+        )
+
+        st.markdown("### 🔄 Importar noticias")
+        col_i1, col_i2, col_i3 = st.columns([2, 2, 3])
+        with col_i1:
+            max_duplicadas_seq = st.number_input(
+                'Parada por duplicadas consecutivas',
+                min_value=1,
+                value=20,
+                step=1,
+                key='max_duplicadas_noticias_dep',
+            )
+        with col_i2:
+            max_scroll_sem_novidade = st.number_input(
+                'Parada por scroll sem novidades',
+                min_value=1,
+                value=8,
+                step=1,
+                key='max_scroll_sem_novidade_noticias_dep',
+            )
+        with col_i3:
+            st.write('')
+            st.write('')
+            importar_noticias = st.button(
+                '🔄 Importar noticias dos deputados',
+                key='importar_noticias_deputados_alesc',
+                use_container_width=True,
+            )
+
+        if importar_noticias:
+            with st.spinner('Importando noticias dos deputados... isso pode levar alguns minutos.'):
+                try:
+                    resultado_import = executar_importacao_noticias_deputados_alesc(
+                        max_duplicadas_sequenciais=int(max_duplicadas_seq),
+                        max_scroll_sem_novidades=int(max_scroll_sem_novidade),
+                    )
+                    st.session_state['import_noticias_deputados_resultado'] = resultado_import
+                    st.cache_data.clear()
+                    st.rerun()
+                except Exception as exc:
+                    st.session_state['import_noticias_deputados_resultado'] = {'erro': str(exc)}
+
+        if 'import_noticias_deputados_resultado' in st.session_state:
+            resumo_import = st.session_state['import_noticias_deputados_resultado']
+            if 'erro' in resumo_import:
+                st.error(f"Erro na importacao de noticias: {resumo_import['erro']}")
+            else:
+                st.success(
+                    f"Importacao concluida: {resumo_import['noticias_inseridas']} inserida(s), "
+                    f"{resumo_import['noticias_duplicadas']} duplicada(s), "
+                    f"{resumo_import['noticias_sem_deputado']} sem vinculo de deputado, "
+                    f"{resumo_import['falhas_extracao_materia']} falha(s)."
+                )
+
+                col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+                with col_s1:
+                    st.metric('URLs descobertas', resumo_import.get('urls_descobertas', 0))
+                with col_s2:
+                    st.metric('Noticias analisadas', resumo_import.get('noticias_analisadas', 0))
+                with col_s3:
+                    st.metric('Inseridas', resumo_import.get('noticias_inseridas', 0))
+                with col_s4:
+                    st.metric('Duracao (s)', resumo_import.get('duracao_segundos', 0))
+
+                if resumo_import.get('motivo_parada'):
+                    st.caption(f"Motivo de parada: {resumo_import['motivo_parada']}")
+
+                if resumo_import.get('mensagens'):
+                    with st.expander('📋 Log da importacao'):
+                        st.text('\n'.join(resumo_import['mensagens']))
+
+        st.markdown('---')
+
+        if total_noticias_deputados_alesc == 0:
+            st.warning(
+                "Nenhuma noticia de deputado importada ainda. "
+                "Use o botao acima para iniciar a primeira carga."
+            )
+            st.info(
+                "Fonte: https://www.alesc.sc.gov.br/deputados/noticias/. "
+                "A importacao abre as materias para extrair o conteudo integral e "
+                "evita duplicidade pela URL da materia."
+            )
+        else:
+            st.subheader(f"📰 Noticias importadas ({total_noticias_deputados_alesc} registro(s))")
+
+            mapa_deputados_noticias = {
+                dep['id']: (
+                    f"{dep['nome']} ({dep['partido']})"
+                    if dep.get('partido')
+                    else dep['nome']
+                )
+                for dep in deputados_com_noticias_alesc
+            }
+
+            col_f1, col_f2 = st.columns(2)
+            with col_f1:
+                filtro_titulo_noticia = st.text_input(
+                    'Filtrar por titulo',
+                    placeholder='Ex: educacao, saude, mobilidade...',
+                    key='filtro_titulo_noticias_dep',
+                ).strip()
+            with col_f2:
+                filtro_deputado_id = st.selectbox(
+                    'Filtrar por deputado',
+                    [None] + list(mapa_deputados_noticias.keys()),
+                    format_func=lambda valor: 'Todos' if valor is None else mapa_deputados_noticias.get(valor, str(valor)),
+                    key='filtro_deputado_noticias_dep',
+                )
+
+            total_noticias_filtradas = contar_noticias_deputados_alesc(
+                filtro_titulo=filtro_titulo_noticia,
+                filtro_deputado_id=filtro_deputado_id,
+            )
+
+            col_p1, col_p2, col_p3 = st.columns([1, 1, 2])
+            with col_p1:
+                itens_por_pagina_noticias = st.selectbox(
+                    'Itens por pagina',
+                    [20, 50, 100],
+                    index=1,
+                    key='itens_por_pagina_noticias_dep',
+                )
+
+            total_paginas_noticias = max(
+                1,
+                (total_noticias_filtradas + itens_por_pagina_noticias - 1) // itens_por_pagina_noticias,
+            )
+
+            with col_p2:
+                pagina_noticias = int(
+                    st.number_input(
+                        'Pagina',
+                        min_value=1,
+                        max_value=total_paginas_noticias,
+                        value=min(st.session_state.get('pagina_noticias_dep', 1), total_paginas_noticias),
+                        step=1,
+                        key='pagina_noticias_dep',
+                    )
+                )
+
+            if total_noticias_filtradas > 0:
+                inicio_noticias = ((pagina_noticias - 1) * itens_por_pagina_noticias) + 1
+                fim_noticias = min(pagina_noticias * itens_por_pagina_noticias, total_noticias_filtradas)
+            else:
+                inicio_noticias = 0
+                fim_noticias = 0
+
+            with col_p3:
+                st.caption(
+                    f"Exibindo {inicio_noticias}-{fim_noticias} de {total_noticias_filtradas} registros "
+                    f"(pagina {pagina_noticias} de {total_paginas_noticias})."
+                )
+
+            if total_noticias_filtradas == 0:
+                st.warning('Nenhuma noticia encontrada com os filtros informados.')
+            else:
+                noticias_pagina = carregar_noticias_deputados_alesc(
+                    pagina=pagina_noticias,
+                    itens_por_pagina=itens_por_pagina_noticias,
+                    filtro_titulo=filtro_titulo_noticia,
+                    filtro_deputado_id=filtro_deputado_id,
+                )
+
+                df_noticias = pd.DataFrame(
+                    [
+                        {
+                            'Data': n['data_materia'],
+                            'Deputado': (
+                                f"{n['deputado_nome']} ({n['deputado_partido']})"
+                                if n.get('deputado_nome') and n.get('deputado_partido')
+                                else (n.get('deputado_nome') or 'Nao identificado')
+                            ),
+                            'Titulo': (n['titulo'][:180] + '...') if n['titulo'] and len(n['titulo']) > 180 else n['titulo'],
+                            'Materia': n['url_materia'],
+                            'Importado em': n['data_importacao'],
+                        }
+                        for n in noticias_pagina
+                    ]
+                )
+
+                st.dataframe(
+                    df_noticias,
+                    hide_index=True,
+                    width='stretch',
+                    column_config={
+                        'Materia': st.column_config.LinkColumn('Materia', display_text='Abrir'),
+                    },
+                )
+
+                primeira_noticia = noticias_pagina[0]
+                st.markdown('### Primeiro registro da pagina atual')
+                st.write(f"**Data da materia:** {primeira_noticia.get('data_materia') or 'Nao informado'}")
+                st.write(
+                    "**Deputado:** "
+                    + (
+                        f"{primeira_noticia.get('deputado_nome')} ({primeira_noticia.get('deputado_partido')})"
+                        if primeira_noticia.get('deputado_nome') and primeira_noticia.get('deputado_partido')
+                        else (primeira_noticia.get('deputado_nome') or 'Nao identificado')
+                    )
+                )
+                st.write(f"**Titulo:** {primeira_noticia.get('titulo') or 'Nao informado'}")
+                if primeira_noticia.get('url_materia'):
+                    st.markdown(f"[Abrir materia completa]({primeira_noticia['url_materia']})")
+
+                st.text_area(
+                    'Conteudo integral da noticia',
+                    value=primeira_noticia.get('conteudo_noticia') or 'Conteudo nao extraido.',
+                    height=320,
+                )
+
+        if st.button('🔄 Atualizar lista de noticias', key='atualizar_noticias_deputados_alesc'):
             st.cache_data.clear()
             st.rerun()
 
