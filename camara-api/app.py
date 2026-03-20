@@ -24,6 +24,7 @@ from api_client import CamaraAPIClient
 from datetime import datetime, timedelta
 import alesc_diario_plenario_scraper as _diario_scraper
 import alesc_noticias_deputados_scraper as _noticias_deputados_scraper
+import alesc_noticias_agenciaal_scraper as _noticias_agenciaal_scraper
 
 # Carregar variáveis de ambiente
 load_dotenv()
@@ -2051,16 +2052,194 @@ elif opcao == "__ALESC__":
 
         return _extrair_estatisticas_import_noticias_alesc(log_texto)
 
+    def _montar_filtro_noticias_agenciaal_alesc(
+        filtro_titulo: str,
+        filtro_data_inicio=None,
+        filtro_data_fim=None,
+    ):
+        where = []
+        params = []
+
+        if filtro_titulo:
+            where.append("n.titulo ILIKE %s")
+            params.append(f"%{filtro_titulo}%")
+
+        if filtro_data_inicio is not None:
+            where.append("n.data_noticia >= %s")
+            params.append(filtro_data_inicio)
+
+        if filtro_data_fim is not None:
+            where.append("n.data_noticia <= %s")
+            params.append(filtro_data_fim)
+
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        return where_sql, params
+
+    @st.cache_data(ttl=3600)
+    def contar_noticias_agenciaal_alesc(
+        filtro_titulo: str = '',
+        filtro_data_inicio=None,
+        filtro_data_fim=None,
+    ):
+        try:
+            where_sql, params = _montar_filtro_noticias_agenciaal_alesc(
+                filtro_titulo,
+                filtro_data_inicio,
+                filtro_data_fim,
+            )
+
+            conn = conectar_postgresql_banco_alesc()
+            cur = conn.cursor()
+            cur.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM doutorado.noticias_agencia_al_alesc n
+                {where_sql}
+                """,
+                params,
+            )
+            total = cur.fetchone()[0]
+            cur.close()
+            conn.close()
+            return total
+        except Exception:
+            return 0
+
+    @st.cache_data(ttl=3600)
+    def carregar_noticias_agenciaal_alesc(
+        pagina: int,
+        itens_por_pagina: int,
+        filtro_titulo: str = '',
+        filtro_data_inicio=None,
+        filtro_data_fim=None,
+    ):
+        try:
+            where_sql, params = _montar_filtro_noticias_agenciaal_alesc(
+                filtro_titulo,
+                filtro_data_inicio,
+                filtro_data_fim,
+            )
+            offset = (pagina - 1) * itens_por_pagina
+
+            conn = conectar_postgresql_banco_alesc()
+            cur = conn.cursor()
+            cur.execute(
+                f"""
+                SELECT
+                    id,
+                    data_noticia,
+                    titulo,
+                    url_noticia,
+                    conteudo_noticia,
+                    data_importacao
+                FROM doutorado.noticias_agencia_al_alesc n
+                {where_sql}
+                ORDER BY data_noticia DESC NULLS LAST, id DESC
+                LIMIT %s OFFSET %s
+                """,
+                params + [itens_por_pagina, offset],
+            )
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+
+            noticias = []
+            for r in rows:
+                noticias.append(
+                    {
+                        'id': r[0],
+                        'data_noticia': r[1].strftime('%d/%m/%Y') if r[1] else None,
+                        'titulo': r[2],
+                        'url_noticia': r[3],
+                        'conteudo_noticia': r[4],
+                        'data_importacao': r[5].strftime('%d/%m/%Y %H:%M:%S') if r[5] else None,
+                    }
+                )
+            return noticias
+        except Exception:
+            return []
+
+    def _extrair_estatisticas_import_noticias_agenciaal(log_texto: str) -> dict:
+        stats = {
+            'scrolls_executados': 0,
+            'urls_descobertas': 0,
+            'noticias_analisadas': 0,
+            'noticias_inseridas': 0,
+            'noticias_duplicadas': 0,
+            'falhas_extracao': 0,
+            'duracao_segundos': 0.0,
+            'motivo_parada': '',
+            'mensagens': [ln for ln in log_texto.splitlines() if ln.strip()],
+        }
+
+        metricas = {
+            'scrolls_executados': r'-\s*Scrolls executados:\s*(\d+)',
+            'urls_descobertas': r'-\s*URLs descobertas:\s*(\d+)',
+            'noticias_analisadas': r'-\s*Noticias analisadas:\s*(\d+)',
+            'noticias_inseridas': r'-\s*Inseridas:\s*(\d+)',
+            'noticias_duplicadas': r'-\s*Duplicadas:\s*(\d+)',
+            'falhas_extracao': r'-\s*Falhas de extracao:\s*(\d+)',
+        }
+
+        for campo, pattern in metricas.items():
+            m = re.search(pattern, log_texto)
+            if m:
+                stats[campo] = int(m.group(1))
+
+        m_duracao = re.search(r'-\s*Duracao \(s\):\s*([0-9]+(?:\.[0-9]+)?)', log_texto)
+        if m_duracao:
+            stats['duracao_segundos'] = float(m_duracao.group(1))
+
+        m_motivo = re.search(r'-\s*Motivo de parada:\s*(.+)', log_texto)
+        if m_motivo:
+            stats['motivo_parada'] = m_motivo.group(1).strip()
+
+        return stats
+
+    def executar_importacao_noticias_agenciaal_alesc(
+        max_duplicadas_sequenciais: int,
+        max_scroll_sem_novidades: int,
+    ) -> dict:
+        script_path = os.path.abspath(_noticias_agenciaal_scraper.__file__)
+        cmd = [
+            sys.executable,
+            script_path,
+            '--max-duplicadas-sequenciais',
+            str(max_duplicadas_sequenciais),
+            '--max-scroll-sem-novidades',
+            str(max_scroll_sem_novidades),
+        ]
+
+        proc = subprocess.run(
+            cmd,
+            cwd=os.path.dirname(script_path),
+            capture_output=True,
+            text=True,
+        )
+
+        log_texto = ((proc.stdout or '') + '\n' + (proc.stderr or '')).strip()
+
+        if proc.returncode != 0:
+            ultimas_linhas = '\n'.join(log_texto.splitlines()[-40:]) if log_texto else 'Sem detalhes no log.'
+            raise RuntimeError(
+                'Falha ao importar noticias da Agencia AL via subprocesso.\n'
+                f'Codigo de saida: {proc.returncode}\n'
+                f'Log:\n{ultimas_linhas}'
+            )
+
+        return _extrair_estatisticas_import_noticias_agenciaal(log_texto)
+
     deputados_alesc = carregar_deputados_alesc()
     total_atas_alesc = contar_atas_alesc()
     total_atas_plenarias_geral = contar_atas_plenarias_alesc()
     sessoes_legislativas_plenarias = carregar_sessoes_legislativas_plenarias_alesc()
     tipos_sessao_plenarias = carregar_tipos_sessao_plenarias_alesc()
     total_noticias_deputados_alesc = contar_noticias_deputados_alesc()
+    total_noticias_agenciaal_alesc = contar_noticias_agenciaal_alesc()
     deputados_com_noticias_alesc = carregar_filtro_deputados_noticias_alesc()
 
-    tab_deputados_alesc, tab_atas_alesc, tab_atas_plenarias_alesc, tab_noticias_deputados_alesc = st.tabs(
-        ["👤 Deputados Estaduais", "📝 Atas", "🏛️ Atas Plenarias", "📰 Noticias Deputados"]
+    tab_deputados_alesc, tab_atas_alesc, tab_atas_plenarias_alesc, tab_noticias_deputados_alesc, tab_noticias_agenciaal_alesc = st.tabs(
+        ["👤 Deputados Estaduais", "📝 Atas", "🏛️ Atas Plenarias", "📰 Noticias Deputados", "📣 Agencia AL"]
     )
 
     with tab_deputados_alesc:
@@ -2701,6 +2880,226 @@ elif opcao == "__ALESC__":
                 )
 
         if st.button('🔄 Atualizar lista de noticias', key='atualizar_noticias_deputados_alesc'):
+            st.cache_data.clear()
+            st.rerun()
+
+    with tab_noticias_agenciaal_alesc:
+        st.info(
+            "Importacao de noticias da Agencia AL com scroll dinamico, "
+            "deduplicacao por URL e parada automatica apos 20 duplicadas consecutivas (configuravel)."
+        )
+
+        st.markdown("### 🔄 Importar noticias da Agencia AL")
+        col_a1, col_a2, col_a3 = st.columns([2, 2, 3])
+        with col_a1:
+            max_duplicadas_seq_ag = st.number_input(
+                'Parada por duplicadas consecutivas',
+                min_value=1,
+                value=20,
+                step=1,
+                key='max_duplicadas_noticias_agenciaal',
+            )
+        with col_a2:
+            max_scroll_sem_novidade_ag = st.number_input(
+                'Parada por scroll sem novidades',
+                min_value=1,
+                value=8,
+                step=1,
+                key='max_scroll_sem_novidade_noticias_agenciaal',
+            )
+        with col_a3:
+            st.write('')
+            st.write('')
+            importar_noticias_agencia = st.button(
+                '🔄 Importar noticias da Agencia AL',
+                key='importar_noticias_agenciaal_alesc',
+                use_container_width=True,
+            )
+
+        if importar_noticias_agencia:
+            with st.spinner('Importando noticias da Agencia AL... isso pode levar alguns minutos.'):
+                try:
+                    resultado_import_ag = executar_importacao_noticias_agenciaal_alesc(
+                        max_duplicadas_sequenciais=int(max_duplicadas_seq_ag),
+                        max_scroll_sem_novidades=int(max_scroll_sem_novidade_ag),
+                    )
+                    st.session_state['import_noticias_agenciaal_resultado'] = resultado_import_ag
+                    st.cache_data.clear()
+                    st.rerun()
+                except Exception as exc:
+                    st.session_state['import_noticias_agenciaal_resultado'] = {'erro': str(exc)}
+
+        if 'import_noticias_agenciaal_resultado' in st.session_state:
+            resumo_import_ag = st.session_state['import_noticias_agenciaal_resultado']
+            if 'erro' in resumo_import_ag:
+                st.error(f"Erro na importacao de noticias da Agencia AL: {resumo_import_ag['erro']}")
+            else:
+                st.success(
+                    f"Importacao concluida: {resumo_import_ag['noticias_inseridas']} inserida(s), "
+                    f"{resumo_import_ag['noticias_duplicadas']} duplicada(s), "
+                    f"{resumo_import_ag['falhas_extracao']} falha(s)."
+                )
+
+                col_ag_s1, col_ag_s2, col_ag_s3, col_ag_s4 = st.columns(4)
+                with col_ag_s1:
+                    st.metric('URLs descobertas', resumo_import_ag.get('urls_descobertas', 0))
+                with col_ag_s2:
+                    st.metric('Noticias analisadas', resumo_import_ag.get('noticias_analisadas', 0))
+                with col_ag_s3:
+                    st.metric('Inseridas', resumo_import_ag.get('noticias_inseridas', 0))
+                with col_ag_s4:
+                    st.metric('Duracao (s)', resumo_import_ag.get('duracao_segundos', 0))
+
+                if resumo_import_ag.get('motivo_parada'):
+                    st.caption(f"Motivo de parada: {resumo_import_ag['motivo_parada']}")
+
+                if resumo_import_ag.get('mensagens'):
+                    with st.expander('📋 Log da importacao'):
+                        st.text('\n'.join(resumo_import_ag['mensagens']))
+
+        st.markdown('---')
+
+        if total_noticias_agenciaal_alesc == 0:
+            st.warning(
+                "Nenhuma noticia da Agencia AL importada ainda. "
+                "Use o botao acima para iniciar a primeira carga."
+            )
+            st.info(
+                "Fonte: https://www.alesc.sc.gov.br/agenciaal/. "
+                "A importacao abre as materias para extrair o conteudo integral e "
+                "evita duplicidade pela URL da noticia."
+            )
+        else:
+            st.subheader(f"📣 Noticias da Agencia AL ({total_noticias_agenciaal_alesc} registro(s))")
+
+            col_fag1, col_fag2, col_fag3 = st.columns(3)
+            with col_fag1:
+                filtro_titulo_noticia_agencia = st.text_input(
+                    'Filtrar por titulo',
+                    placeholder='Ex: plenario, comissao, projeto...',
+                    key='filtro_titulo_noticias_agenciaal',
+                ).strip()
+            with col_fag2:
+                usar_data_inicio_agencia = st.checkbox(
+                    'Usar data inicial',
+                    key='usar_data_inicio_noticias_agenciaal',
+                )
+                if usar_data_inicio_agencia:
+                    filtro_data_inicio_agencia = st.date_input(
+                        'Data inicial',
+                        value=datetime.now().date() - timedelta(days=30),
+                        key='filtro_data_inicio_noticias_agenciaal',
+                    )
+                else:
+                    filtro_data_inicio_agencia = None
+            with col_fag3:
+                usar_data_fim_agencia = st.checkbox(
+                    'Usar data final',
+                    key='usar_data_fim_noticias_agenciaal',
+                )
+                if usar_data_fim_agencia:
+                    filtro_data_fim_agencia = st.date_input(
+                        'Data final',
+                        value=datetime.now().date(),
+                        key='filtro_data_fim_noticias_agenciaal',
+                    )
+                else:
+                    filtro_data_fim_agencia = None
+
+            if filtro_data_inicio_agencia and filtro_data_fim_agencia and filtro_data_inicio_agencia > filtro_data_fim_agencia:
+                st.error('A data inicial deve ser menor ou igual a data final.')
+
+            total_noticias_agencia_filtradas = contar_noticias_agenciaal_alesc(
+                filtro_titulo=filtro_titulo_noticia_agencia,
+                filtro_data_inicio=filtro_data_inicio_agencia,
+                filtro_data_fim=filtro_data_fim_agencia,
+            )
+
+            col_pag_a1, col_pag_a2, col_pag_a3 = st.columns([1, 1, 2])
+            with col_pag_a1:
+                itens_por_pagina_noticias_ag = st.selectbox(
+                    'Itens por pagina',
+                    [20, 50, 100],
+                    index=1,
+                    key='itens_por_pagina_noticias_agenciaal',
+                )
+
+            total_paginas_noticias_ag = max(
+                1,
+                (total_noticias_agencia_filtradas + itens_por_pagina_noticias_ag - 1) // itens_por_pagina_noticias_ag,
+            )
+
+            with col_pag_a2:
+                pagina_noticias_ag = int(
+                    st.number_input(
+                        'Pagina',
+                        min_value=1,
+                        max_value=total_paginas_noticias_ag,
+                        value=min(st.session_state.get('pagina_noticias_agenciaal', 1), total_paginas_noticias_ag),
+                        step=1,
+                        key='pagina_noticias_agenciaal',
+                    )
+                )
+
+            if total_noticias_agencia_filtradas > 0:
+                inicio_noticias_ag = ((pagina_noticias_ag - 1) * itens_por_pagina_noticias_ag) + 1
+                fim_noticias_ag = min(pagina_noticias_ag * itens_por_pagina_noticias_ag, total_noticias_agencia_filtradas)
+            else:
+                inicio_noticias_ag = 0
+                fim_noticias_ag = 0
+
+            with col_pag_a3:
+                st.caption(
+                    f"Exibindo {inicio_noticias_ag}-{fim_noticias_ag} de {total_noticias_agencia_filtradas} registros "
+                    f"(pagina {pagina_noticias_ag} de {total_paginas_noticias_ag})."
+                )
+
+            if total_noticias_agencia_filtradas == 0:
+                st.warning('Nenhuma noticia da Agencia AL encontrada com os filtros informados.')
+            else:
+                noticias_agencia_pagina = carregar_noticias_agenciaal_alesc(
+                    pagina=pagina_noticias_ag,
+                    itens_por_pagina=itens_por_pagina_noticias_ag,
+                    filtro_titulo=filtro_titulo_noticia_agencia,
+                    filtro_data_inicio=filtro_data_inicio_agencia,
+                    filtro_data_fim=filtro_data_fim_agencia,
+                )
+
+                df_noticias_agencia = pd.DataFrame(
+                    [
+                        {
+                            'Data': n['data_noticia'],
+                            'Titulo': (n['titulo'][:180] + '...') if n['titulo'] and len(n['titulo']) > 180 else n['titulo'],
+                            'Materia': n['url_noticia'],
+                            'Importado em': n['data_importacao'],
+                        }
+                        for n in noticias_agencia_pagina
+                    ]
+                )
+
+                st.dataframe(
+                    df_noticias_agencia,
+                    hide_index=True,
+                    width='stretch',
+                    column_config={
+                        'Materia': st.column_config.LinkColumn('Materia', display_text='Abrir'),
+                    },
+                )
+
+                primeira_noticia_ag = noticias_agencia_pagina[0]
+                st.markdown('### Primeiro registro da pagina atual')
+                st.write(f"**Data da noticia:** {primeira_noticia_ag.get('data_noticia') or 'Nao informado'}")
+                st.write(f"**Titulo:** {primeira_noticia_ag.get('titulo') or 'Nao informado'}")
+                if primeira_noticia_ag.get('url_noticia'):
+                    st.markdown(f"[Abrir noticia completa]({primeira_noticia_ag['url_noticia']})")
+
+                st.text_area(
+                    'Conteudo integral da noticia',
+                    value=primeira_noticia_ag.get('conteudo_noticia') or 'Conteudo nao extraido.',
+                    height=320,
+                )
+
+        if st.button('🔄 Atualizar lista de noticias da Agencia AL', key='atualizar_noticias_agenciaal_alesc'):
             st.cache_data.clear()
             st.rerun()
 
